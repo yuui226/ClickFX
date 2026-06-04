@@ -210,14 +210,16 @@ class OverlayManager : IDisposable
 
     void OnTimerTick(object sender, EventArgs e)
     {
-        var effect = EffectRegistry.Get(Config.ActiveEffect);
-        int duration = (effect != null) ? effect.Duration : 600;
-
         lock (_animations)
         {
             for (int i = _animations.Count - 1; i >= 0; i--)
             {
                 _animations[i].Age += TICK_MS;
+                var effectName = (_animations[i].Button == MouseButtons.Left)
+                    ? Config.LeftEffect
+                    : Config.RightEffect;
+                var effect = EffectRegistry.Get(effectName);
+                int duration = (effect != null) ? effect.Duration : 600;
                 if (_animations[i].Age > duration)
                     _animations.RemoveAt(i);
             }
@@ -362,7 +364,6 @@ class OverlayForm : Form
         if (w <= 0 || h <= 0) return;
 
         var anims = Manager.GetAnimationsForScreen(Bounds);
-        var effect = EffectRegistry.Get(Manager.Config.ActiveEffect);
 
         var bih = new BITMAPINFOHEADER();
         bih.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
@@ -381,7 +382,7 @@ class OverlayForm : Form
         IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
         IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
 
-        if (anims.Count > 0 && effect != null)
+        if (anims.Count > 0)
         {
             using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
             using (var g = Graphics.FromImage(bmp))
@@ -395,7 +396,12 @@ class OverlayForm : Form
                     var color = (anims[i].Button == MouseButtons.Left)
                         ? Manager.Config.LeftClick
                         : Manager.Config.RightClick;
-                    effect.Draw(g, anims[i], color, Bounds);
+                    var effectName = (anims[i].Button == MouseButtons.Left)
+                        ? Manager.Config.LeftEffect
+                        : Manager.Config.RightEffect;
+                    var effect = EffectRegistry.Get(effectName);
+                    if (effect != null)
+                        effect.Draw(g, anims[i], color, Bounds);
                 }
 
                 var bmpData = bmp.LockBits(

@@ -12,7 +12,8 @@ using System.Windows.Forms;
 class AppConfig
 {
     public int Version { get; set; }
-    public string ActiveEffect { get; set; }
+    public string LeftEffect { get; set; }
+    public string RightEffect { get; set; }
     public ColorConfig LeftClick { get; set; }
     public ColorConfig RightClick { get; set; }
     public string InfoText { get; set; }
@@ -21,7 +22,8 @@ class AppConfig
     public AppConfig()
     {
         Version = 1;
-        ActiveEffect = "线条爆发";
+        LeftEffect = "线条爆发";
+        RightEffect = "线条爆发";
         LeftClick = new ColorConfig("#508CFF");
         RightClick = new ColorConfig("#FF6060");
         InfoText = "";
@@ -96,7 +98,8 @@ static class ConfigManager
     {
         return "{\n"
             + "  \"Version\": " + c.Version + ",\n"
-            + "  \"ActiveEffect\": " + Quote(c.ActiveEffect) + ",\n"
+            + "  \"LeftEffect\": " + Quote(c.LeftEffect) + ",\n"
+            + "  \"RightEffect\": " + Quote(c.RightEffect) + ",\n"
             + "  \"LeftClick\": " + SerializeColor(c.LeftClick) + ",\n"
             + "  \"RightClick\": " + SerializeColor(c.RightClick) + ",\n"
             + "  \"InfoText\": " + Quote(c.InfoText ?? "") + ",\n"
@@ -127,8 +130,10 @@ static class ConfigManager
         int ver;
         if (d.ContainsKey("Version") && int.TryParse(d["Version"], out ver))
             c.Version = ver;
-        if (d.ContainsKey("ActiveEffect"))
-            c.ActiveEffect = d["ActiveEffect"];
+        if (d.ContainsKey("LeftEffect"))
+            c.LeftEffect = d["LeftEffect"];
+        if (d.ContainsKey("RightEffect"))
+            c.RightEffect = d["RightEffect"];
         if (d.ContainsKey("LeftClick"))
             c.LeftClick = ParseColor(d["LeftClick"]);
         if (d.ContainsKey("RightClick"))
@@ -252,7 +257,7 @@ class ConfigForm : Form
 {
     public AppConfig Result { get; private set; }
 
-    ComboBox _effectCombo;
+    ComboBox _leftEffectCombo, _rightEffectCombo;
     Panel _leftPreview, _rightPreview;
     TextBox _leftHex, _rightHex;
     Button _leftPick, _rightPick;
@@ -275,20 +280,32 @@ class ConfigForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(380, 310);
+        ClientSize = new Size(380, 345);
 
         int y = 15;
 
-        // 动效选择
-        Controls.Add(new Label { Text = "动效：", Location = new Point(15, y + 3), AutoSize = true });
-        _effectCombo = new ComboBox
+        // 左键动效
+        Controls.Add(new Label { Text = "左键动效：", Location = new Point(15, y + 3), AutoSize = true });
+        _leftEffectCombo = new ComboBox
         {
-            Location = new Point(70, y),
-            Size = new Size(200, 25),
+            Location = new Point(90, y),
+            Size = new Size(180, 25),
             DropDownStyle = ComboBoxStyle.DropDownList
         };
-        _effectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
-        Controls.Add(_effectCombo);
+        _leftEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
+        Controls.Add(_leftEffectCombo);
+        y += 35;
+
+        // 右键动效
+        Controls.Add(new Label { Text = "右键动效：", Location = new Point(15, y + 3), AutoSize = true });
+        _rightEffectCombo = new ComboBox
+        {
+            Location = new Point(90, y),
+            Size = new Size(180, 25),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _rightEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
+        Controls.Add(_rightEffectCombo);
         y += 40;
 
         // 左键颜色
@@ -351,10 +368,15 @@ class ConfigForm : Form
 
     void LoadValues(AppConfig config)
     {
-        if (_effectCombo.Items.Contains(config.ActiveEffect))
-            _effectCombo.SelectedItem = config.ActiveEffect;
-        else if (_effectCombo.Items.Count > 0)
-            _effectCombo.SelectedIndex = 0;
+        if (_leftEffectCombo.Items.Contains(config.LeftEffect))
+            _leftEffectCombo.SelectedItem = config.LeftEffect;
+        else if (_leftEffectCombo.Items.Count > 0)
+            _leftEffectCombo.SelectedIndex = 0;
+
+        if (_rightEffectCombo.Items.Contains(config.RightEffect))
+            _rightEffectCombo.SelectedItem = config.RightEffect;
+        else if (_rightEffectCombo.Items.Count > 0)
+            _rightEffectCombo.SelectedIndex = 0;
 
         _leftHex.Text = config.LeftClick.Primary;
         _rightHex.Text = config.RightClick.Primary;
@@ -374,7 +396,8 @@ class ConfigForm : Form
     void ApplyValues()
     {
         Result = new AppConfig();
-        Result.ActiveEffect = (_effectCombo.SelectedItem as string) ?? "线条爆发";
+        Result.LeftEffect = (_leftEffectCombo.SelectedItem as string) ?? "线条爆发";
+        Result.RightEffect = (_rightEffectCombo.SelectedItem as string) ?? "线条爆发";
         Result.LeftClick = new ColorConfig(NormalizeHexValue(_leftHex.Text));
         Result.RightClick = new ColorConfig(NormalizeHexValue(_rightHex.Text));
         Result.InfoText = _originalConfig.InfoText;

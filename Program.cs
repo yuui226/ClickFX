@@ -19,6 +19,10 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
 
         EffectRegistry.Register(new LineBurstEffect());
+        EffectRegistry.Register(new RippleEffect());
+        EffectRegistry.Register(new SparkEffect());
+        EffectRegistry.Register(new StarEffect());
+        EffectRegistry.Register(new PetalEffect());
 
         var manager = new OverlayManager();
         manager.Start();
