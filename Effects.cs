@@ -13,6 +13,7 @@ interface IClickEffect
     string Name { get; }
     int Duration { get; }
     void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds);
+    void Cleanup();
 }
 
 // ==================== 动画状态 ====================
@@ -23,6 +24,7 @@ class AnimationState
     public int Age;
     public int Duration;
     public MouseButtons Button;
+    public int RandomSeed;
 }
 
 // ==================== 缓动函数 ====================
@@ -61,6 +63,12 @@ class LineBurstEffect : IClickEffect
 
     Pen _linePen = new Pen(Color.Black, 3f);
     Pen _glowPen = new Pen(Color.Black, 1.5f);
+
+    public void Cleanup()
+    {
+        _linePen.Dispose();
+        _glowPen.Dispose();
+    }
 
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
     {
@@ -139,6 +147,11 @@ class RippleEffect : IClickEffect
         return new Random(unchecked(x * 92837 ^ y * 4177));
     }
 
+    public void Cleanup()
+    {
+        _pen.Dispose();
+    }
+
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
     {
         int cx = anim.Position.X - screenBounds.X;
@@ -149,7 +162,7 @@ class RippleEffect : IClickEffect
         try { baseColor = ColorTranslator.FromHtml(color.Primary); }
         catch { baseColor = Color.White; }
 
-        Random rng = MakeRng(anim.Position.X, anim.Position.Y);
+        Random rng = new Random(unchecked(anim.RandomSeed ^ 92837));
         int ringCount = 2 + rng.Next(3);
         float maxRadius = 16f + (float)(rng.NextDouble() * 8f);
         float stagger = 0.08f + (float)(rng.NextDouble() * 0.08f);
@@ -192,6 +205,11 @@ class SparkEffect : IClickEffect
         return new Random(unchecked(x * 73856093 ^ y * 19349663));
     }
 
+    public void Cleanup()
+    {
+        _brush.Dispose();
+    }
+
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
     {
         int cx = anim.Position.X - screenBounds.X;
@@ -202,21 +220,7 @@ class SparkEffect : IClickEffect
         try { baseColor = ColorTranslator.FromHtml(color.Primary); }
         catch { baseColor = Color.White; }
 
-        Random rng = MakeRng(anim.Position.X, anim.Position.Y);
-
-        // 中心闪光：前 120ms 亮后消失
-        if (anim.Age < 120)
-        {
-            float flashT = anim.Age / 120f;
-            float flashAlpha = (flashT < 0.3f) ? flashT / 0.3f : 1f - Easing.EaseInQuad((flashT - 0.3f) / 0.7f);
-            if (flashAlpha > 0f)
-            {
-                int fa = (int)(255 * flashAlpha);
-                _brush.Color = Color.FromArgb(fa, Color.White);
-                float fr = 4f * (1f - flashT * 0.5f);
-                g.FillEllipse(_brush, cx - fr, cy - fr, fr * 2, fr * 2);
-            }
-        }
+        Random rng = new Random(unchecked(anim.RandomSeed ^ 73856093));
 
         // 粒子：快速弹出，平滑缩小消失
         float shrink = 1f - Easing.EaseInQuad(t);
@@ -247,17 +251,21 @@ class SparkEffect : IClickEffect
 class StarEffect : IClickEffect
 {
     public string Name { get { return "星光"; } }
-    public int Duration { get { return 350; } }
+    public int Duration { get { return 500; } }
 
-    const float MaxRadius = 14f;
-    const float InnerRatio = 0.5f;
+    const int StarCount = 7;
+    const float MaxDist = 28f;
+    const float BaseSize = 2.8f;
+    const float SizeJitter = 1.8f;
+    const float CurveStrength = 8f;
 
-    Pen _rayPen = new Pen(Color.Black, 2f);
+    Pen _pen = new Pen(Color.Black, 1.2f);
     SolidBrush _brush = new SolidBrush(Color.Black);
 
-    static Random MakeRng(int x, int y)
+    public void Cleanup()
     {
-        return new Random(unchecked(x * 1299709 ^ y * 7457));
+        _pen.Dispose();
+        _brush.Dispose();
     }
 
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
@@ -270,54 +278,89 @@ class StarEffect : IClickEffect
         try { baseColor = ColorTranslator.FromHtml(color.Primary); }
         catch { baseColor = Color.White; }
 
-        Random rng = MakeRng(anim.Position.X, anim.Position.Y);
-        int rayCount = 6 + rng.Next(5);
-        float initRot = (float)(rng.NextDouble() * Math.PI * 2);
-        float rotDir = (rng.Next(2) == 0) ? 1f : -1f;
-        float bri = 0.85f + (float)(rng.NextDouble() * 0.15f);
+        // 每次点击用不同种子 → 轨迹随机
+        Random rng = new Random(unchecked(anim.RandomSeed ^ 1299709));
 
-        // 膨胀 + 缩小 + 混合淡出
-        float expand = Easing.EaseOutBack(Math.Min(1f, t * 3f));
-        float shrink = 1f - Easing.EaseInQuad(t);
-        float radius = MaxRadius * expand * shrink;
-        float alpha = shrink;
-        float rotExtra = rotDir * 30f * t;
-        if (alpha <= 0f || radius < 0.5f) return;
-
-        int a = (int)(255 * alpha * bri);
-        int glowA = (int)(255 * alpha * 0.25f);
-        float rotRad = initRot + rotExtra * (float)Math.PI / 180f;
-        float stroke = 2f * shrink;
-
-        // 光晕
-        DrawStar(g, cx, cy, radius * 1.5f, rotRad, rayCount, Color.FromArgb(glowA, baseColor), stroke * 1.2f);
-
-        // 主体
-        DrawStar(g, cx, cy, radius, rotRad, rayCount, Color.FromArgb(a, baseColor), stroke);
-
-        // 中心亮点
-        float dotAlpha = (t < 0.3f) ? t / 0.3f : shrink;
-        if (dotAlpha > 0f)
+        // ── 星星粒子 ──
+        for (int i = 0; i < StarCount; i++)
         {
-            int da = (int)(255 * dotAlpha);
-            _brush.Color = Color.FromArgb(da, Color.White);
-            float dr = 2.5f * shrink;
-            g.FillEllipse(_brush, cx - dr, cy - dr, dr * 2, dr * 2);
+            float angle = (float)(rng.NextDouble() * Math.PI * 2);
+            float delay = 0.05f + (float)(rng.NextDouble() * 0.25f);
+            float life = 0.5f + (float)(rng.NextDouble() * 0.45f);
+            float dist = MaxDist * (0.6f + (float)(rng.NextDouble() * 0.4f));
+            float size = BaseSize + (float)(rng.NextDouble() * SizeJitter);
+            float bri = 0.75f + (float)(rng.NextDouble() * 0.25f);
+            float curve = ((rng.Next(2) == 0) ? 1f : -1f) * CurveStrength * (0.5f + (float)(rng.NextDouble()));
+            float twinkleSpeed = 0.8f + (float)(rng.NextDouble() * 0.7f);
+            float initRot = (float)(rng.NextDouble() * Math.PI * 2);
+            float rotSpeed = ((rng.Next(2) == 0) ? 1f : -1f) * (80f + (float)(rng.NextDouble() * 120f));
+
+            // 粒子局部时间
+            float localT = (t - delay) / life;
+            if (localT <= 0f || localT >= 1f) continue;
+
+            // 运动：弹出 + 缓慢滑行
+            float moveT = Easing.EaseOutQuad(Math.Min(1f, localT * 2.5f));
+            float drift = Easing.EaseInQuad(Math.Max(0f, localT - 0.4f) / 0.6f) * dist * 0.4f;
+            float r = dist * moveT + drift;
+
+            // 轨迹弯曲（垂直方向偏移）
+            float perpAngle = angle + (float)Math.PI / 2f;
+            float curveAmount = curve * Easing.EaseInQuad(localT);
+
+            float px = cx + (float)Math.Cos(angle) * r + (float)Math.Cos(perpAngle) * curveAmount;
+            float py = cy + (float)Math.Sin(angle) * r + (float)Math.Sin(perpAngle) * curveAmount;
+
+            // 透明度：淡入 + 缓慢闪烁 + 淡出
+            float fadeIn = Math.Min(1f, localT * 6f);
+            float fadeOut = 1f - Easing.EaseInQuad(Math.Max(0f, localT - 0.5f) / 0.5f);
+            float twinkle = 0.7f + 0.3f * (float)Math.Sin(localT * twinkleSpeed * Math.PI * 2);
+            float alpha = fadeIn * fadeOut * twinkle * bri;
+            if (alpha <= 0.01f) continue;
+
+            // 大小：弹出后缓慢缩小
+            float sizeScale = Easing.EaseOutBack(Math.Min(1f, localT * 4f))
+                            * (1f - Easing.EaseInQuad(Math.Max(0f, localT - 0.6f) / 0.4f) * 0.6f);
+            float s = size * sizeScale;
+            if (s < 0.3f) continue;
+
+            // 旋转
+            float rot = initRot + rotSpeed * localT * (float)Math.PI / 180f;
+
+            int a = (int)(255 * alpha);
+
+            // 彩色星形主体
+            _pen.Width = 1.5f * sizeScale;
+            _pen.Color = Color.FromArgb((int)(255 * Math.Min(1f, alpha * 1.2f)), baseColor);
+            DrawTinyStar(g, px, py, s, rot, 4, _pen);
+
+            // 中心高光点
+            _brush.Color = Color.FromArgb(a, Color.White);
+            float dotR = s * 0.15f;
+            g.FillEllipse(_brush, px - dotR, py - dotR, dotR * 2, dotR * 2);
         }
     }
 
-    void DrawStar(Graphics g, float cx, float cy, float radius, float rotation, int rayCount, Color color, float stroke)
+    void DrawTinyStar(Graphics g, float cx, float cy, float radius, float rotation, int points, Pen pen)
     {
-        _rayPen.Width = stroke;
-        _rayPen.Color = color;
-
-        for (int i = 0; i < rayCount; i++)
+        float inner = radius * 0.35f;
+        for (int i = 0; i < points; i++)
         {
-            float angle = rotation + i * (float)(Math.PI * 2) / rayCount;
-            float len = (i % 2 == 0) ? radius : radius * InnerRatio;
-            float ex = cx + (float)Math.Cos(angle) * len;
-            float ey = cy + (float)Math.Sin(angle) * len;
-            g.DrawLine(_rayPen, cx, cy, ex, ey);
+            float a1 = rotation + i * (float)(Math.PI * 2) / points;
+            float a2 = a1 + (float)Math.PI / points;
+            float x1 = cx + (float)Math.Cos(a1) * radius;
+            float y1 = cy + (float)Math.Sin(a1) * radius;
+            float x2 = cx + (float)Math.Cos(a2) * inner;
+            float y2 = cy + (float)Math.Sin(a2) * inner;
+            g.DrawLine(pen, x1, y1, x2, y2);
+
+            float a3 = a2;
+            float a4 = rotation + (i + 1) * (float)(Math.PI * 2) / points;
+            float x3 = cx + (float)Math.Cos(a3) * inner;
+            float y3 = cy + (float)Math.Sin(a3) * inner;
+            float x4 = cx + (float)Math.Cos(a4) * radius;
+            float y4 = cy + (float)Math.Sin(a4) * radius;
+            g.DrawLine(pen, x3, y3, x4, y4);
         }
     }
 }
@@ -334,11 +377,15 @@ class PetalEffect : IClickEffect
     const float PetalWidth = 3.5f;
 
     SolidBrush _petalBrush = new SolidBrush(Color.Black);
-    SolidBrush _dotBrush = new SolidBrush(Color.White);
 
     static Random MakeRng(int x, int y)
     {
         return new Random(unchecked(x * 6271 ^ y * 4153));
+    }
+
+    public void Cleanup()
+    {
+        _petalBrush.Dispose();
     }
 
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
@@ -351,7 +398,7 @@ class PetalEffect : IClickEffect
         try { baseColor = ColorTranslator.FromHtml(color.Primary); }
         catch { baseColor = Color.White; }
 
-        Random rng = MakeRng(anim.Position.X, anim.Position.Y);
+        Random rng = new Random(unchecked(anim.RandomSeed ^ 6271));
         int petalCount = 3 + rng.Next(3);
         float initRot = (float)(rng.NextDouble() * 360);
         float rotDir = (rng.Next(2) == 0) ? 1f : -1f;
@@ -386,11 +433,6 @@ class PetalEffect : IClickEffect
 
             g.Restore(state);
         }
-
-        // 中心亮点
-        _dotBrush.Color = Color.FromArgb(a, Color.White);
-        float dr = 2f * shrink;
-        g.FillEllipse(_dotBrush, cx - dr, cy - dr, dr * 2, dr * 2);
     }
 }
 
@@ -418,5 +460,12 @@ static class EffectRegistry
         foreach (var kv in _effects)
             names.Add(kv.Key);
         return names;
+    }
+
+    public static void Cleanup()
+    {
+        foreach (var kv in _effects)
+            kv.Value.Cleanup();
+        _effects.Clear();
     }
 }

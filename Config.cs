@@ -52,21 +52,16 @@ class ColorConfig
 
 static class ConfigManager
 {
-    static string ConfigDir
-    {
-        get
-        {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "ClickFX");
-            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-            return dir;
-        }
-    }
+    static readonly string ConfigDir = InitConfigDir();
+    static readonly string ConfigPath = Path.Combine(ConfigDir, "config.json");
 
-    static string ConfigPath
+    static string InitConfigDir()
     {
-        get { return Path.Combine(ConfigDir, "config.json"); }
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "ClickFX");
+        if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+        return dir;
     }
 
     public static AppConfig Load()
@@ -262,6 +257,7 @@ class ConfigForm : Form
     TextBox _leftHex, _rightHex;
     Button _leftPick, _rightPick;
     Label _infoLabel;
+    LinkLabel _projectLink;
 
     AppConfig _originalConfig;
 
@@ -353,7 +349,19 @@ class ConfigForm : Form
             BackColor = SystemColors.ControlLightLight
         };
         Controls.Add(_infoLabel);
-        y += 75;
+        y += 65;
+
+        _projectLink = new LinkLabel
+        {
+            Text = "GitHub: https://github.com/HUYUSHII/ClickFX",
+            Location = new Point(15, y),
+            Size = new Size(340, 18),
+            AutoSize = false
+        };
+        _projectLink.LinkClicked += (s, e) =>
+            System.Diagnostics.Process.Start("https://github.com/HUYUSHII/ClickFX");
+        Controls.Add(_projectLink);
+        y += 25;
 
         // 确定 / 取消
         var okBtn = new Button { Text = "确定", DialogResult = DialogResult.OK, Location = new Point(190, y), Size = new Size(80, 28) };
@@ -399,7 +407,9 @@ class ConfigForm : Form
         Result.LeftEffect = (_leftEffectCombo.SelectedItem as string) ?? "线条爆发";
         Result.RightEffect = (_rightEffectCombo.SelectedItem as string) ?? "线条爆发";
         Result.LeftClick = new ColorConfig(NormalizeHexValue(_leftHex.Text));
+        Result.LeftClick.GlowIntensity = _originalConfig.LeftClick.GlowIntensity;
         Result.RightClick = new ColorConfig(NormalizeHexValue(_rightHex.Text));
+        Result.RightClick.GlowIntensity = _originalConfig.RightClick.GlowIntensity;
         Result.InfoText = _originalConfig.InfoText;
         Result.InfoUrl = _originalConfig.InfoUrl;
     }

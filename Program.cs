@@ -21,9 +21,6 @@ static class Program
             return;
         }
 
-        if (Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
-            Thread.CurrentThread.SetApartmentState(ApartmentState.STA);
-
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
@@ -36,9 +33,16 @@ static class Program
         var manager = new OverlayManager();
         manager.Start();
 
-        Application.Run();
-
-        ConfigManager.Save(manager.Config);
-        manager.Dispose();
+        try
+        {
+            Application.Run();
+        }
+        finally
+        {
+            ConfigManager.Save(manager.Config);
+            manager.Dispose();
+            EffectRegistry.Cleanup();
+            GC.KeepAlive(_mutex);
+        }
     }
 }

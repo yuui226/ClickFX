@@ -70,6 +70,9 @@ static class NativeMethods
 
     [DllImport("winmm.dll")]
     public static extern uint timeEndPeriod(uint uMilliseconds);
+
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(IntPtr hIcon);
 }
 
 public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -140,6 +143,7 @@ class OverlayManager : IDisposable
     readonly List<OverlayForm> _overlays = new List<OverlayForm>();
     readonly List<AnimationState> _animations = new List<AnimationState>();
     readonly Timer _timer;
+    bool _hadAnimations;
     IntPtr _hookId = IntPtr.Zero;
     LowLevelMouseProc _hookProc;
     NotifyIcon _trayIcon;
@@ -222,11 +226,12 @@ class OverlayManager : IDisposable
             hasAnimations = _animations.Count > 0;
         }
 
-        if (hasAnimations)
+        if (hasAnimations || _hadAnimations)
         {
             for (int i = 0; i < _overlays.Count; i++)
                 _overlays[i].Invalidate();
         }
+        _hadAnimations = hasAnimations;
     }
 
     IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -251,19 +256,30 @@ class OverlayManager : IDisposable
         return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
 
+    static readonly Random _globalRng = new Random();
+    DateTime _lastClickTime = DateTime.MinValue;
+
     void AddAnimation(Point pos, MouseButtons button)
     {
+        var now = DateTime.UtcNow;
+        if ((now - _lastClickTime).TotalMilliseconds < 50) return;
+        _lastClickTime = now;
+
         var effectName = (button == MouseButtons.Left)
             ? Config.LeftEffect
             : Config.RightEffect;
         var effect = EffectRegistry.Get(effectName);
         int duration = (effect != null) ? effect.Duration : 600;
 
+        int seed;
+        lock (_globalRng) { seed = _globalRng.Next(); }
+
         lock (_animations)
         {
             _animations.Add(new AnimationState
             {
-                Position = pos, Age = 0, Button = button, Duration = duration
+                Position = pos, Age = 0, Button = button, Duration = duration,
+                RandomSeed = seed
             });
         }
     }
@@ -322,7 +338,11 @@ class OverlayManager : IDisposable
                 g.DrawLine(pen, 11, 8, 15, 8);
             }
         }
-        return Icon.FromHandle(bmp.GetHicon());
+        IntPtr hIcon = bmp.GetHicon();
+        var icon = Icon.FromHandle(hIcon);
+        var cloned = (Icon)icon.Clone(); // 拷贝一份，脱离原始句柄
+        NativeMethods.DestroyIcon(hIcon);
+        return cloned;
     }
 }
 
@@ -388,35 +408,32 @@ class OverlayForm : Form
         IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
         IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
 
-        if (anims.Count > 0)
+        using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+        using (var g = Graphics.FromImage(bmp))
         {
-            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
-            using (var g = Graphics.FromImage(bmp))
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.CompositingQuality = CompositingQuality.HighQuality;
+            g.Clear(Color.Transparent);
+
+            for (int i = 0; i < anims.Count; i++)
             {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.CompositingQuality = CompositingQuality.HighQuality;
-                g.Clear(Color.Transparent);
-
-                for (int i = 0; i < anims.Count; i++)
-                {
-                    var color = (anims[i].Button == MouseButtons.Left)
-                        ? Manager.Config.LeftClick
-                        : Manager.Config.RightClick;
-                    var effectName = (anims[i].Button == MouseButtons.Left)
-                        ? Manager.Config.LeftEffect
-                        : Manager.Config.RightEffect;
-                    var effect = EffectRegistry.Get(effectName);
-                    if (effect != null)
-                        effect.Draw(g, anims[i], color, Bounds);
-                }
-
-                var bmpData = bmp.LockBits(
-                    new Rectangle(0, 0, w, h),
-                    ImageLockMode.ReadOnly,
-                    PixelFormat.Format32bppArgb);
-                NativeMethods.CopyMemory(pBits, bmpData.Scan0, (uint)(w * h * 4));
-                bmp.UnlockBits(bmpData);
+                var color = (anims[i].Button == MouseButtons.Left)
+                    ? Manager.Config.LeftClick
+                    : Manager.Config.RightClick;
+                var effectName = (anims[i].Button == MouseButtons.Left)
+                    ? Manager.Config.LeftEffect
+                    : Manager.Config.RightEffect;
+                var effect = EffectRegistry.Get(effectName);
+                if (effect != null)
+                    effect.Draw(g, anims[i], color, Bounds);
             }
+
+            var bmpData = bmp.LockBits(
+                new Rectangle(0, 0, w, h),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+            NativeMethods.CopyMemory(pBits, bmpData.Scan0, (uint)(w * h * 4));
+            bmp.UnlockBits(bmpData);
         }
 
         var pptDst = new POINT { X = Left, Y = Top };
