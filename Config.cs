@@ -276,7 +276,7 @@ class ConfigForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(380, 345);
+        ClientSize = new Size(380, 380);
 
         int y = 15;
 
