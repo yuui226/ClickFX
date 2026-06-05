@@ -25,6 +25,19 @@ class AnimationState
     public int Duration;
     public MouseButtons Button;
     public int RandomSeed;
+    public string EffectName;
+    public IClickEffect CachedEffect;
+    Color _cachedColor;
+
+    public Color GetColor(ColorConfig config)
+    {
+        if (_cachedColor.A == 0)
+        {
+            try { _cachedColor = ColorTranslator.FromHtml(config.Primary); }
+            catch { _cachedColor = Color.White; }
+        }
+        return _cachedColor;
+    }
 }
 
 // ==================== 缓动函数 ====================
@@ -78,9 +91,7 @@ class LineBurstEffect : IClickEffect
         float progress = Math.Min(1f, anim.Age / 500f);
         if (progress >= 1f) return;
 
-        Color baseColor;
-        try { baseColor = ColorTranslator.FromHtml(color.Primary); }
-        catch { baseColor = Color.White; }
+        Color baseColor = anim.GetColor(color);
         float glowIntensity = color.GlowIntensity;
 
         for (int i = 0; i < 3; i++)
@@ -158,9 +169,7 @@ class RippleEffect : IClickEffect
         int cy = anim.Position.Y - screenBounds.Y;
         float t = anim.Age / (float)Duration;
 
-        Color baseColor;
-        try { baseColor = ColorTranslator.FromHtml(color.Primary); }
-        catch { baseColor = Color.White; }
+        Color baseColor = anim.GetColor(color);
 
         Random rng = new Random(unchecked(anim.RandomSeed ^ 92837));
         int ringCount = 2 + rng.Next(3);
@@ -216,9 +225,7 @@ class SparkEffect : IClickEffect
         int cy = anim.Position.Y - screenBounds.Y;
         float t = anim.Age / (float)Duration;
 
-        Color baseColor;
-        try { baseColor = ColorTranslator.FromHtml(color.Primary); }
-        catch { baseColor = Color.White; }
+        Color baseColor = anim.GetColor(color);
 
         Random rng = new Random(unchecked(anim.RandomSeed ^ 73856093));
 
@@ -274,9 +281,7 @@ class StarEffect : IClickEffect
         int cy = anim.Position.Y - screenBounds.Y;
         float t = anim.Age / (float)Duration;
 
-        Color baseColor;
-        try { baseColor = ColorTranslator.FromHtml(color.Primary); }
-        catch { baseColor = Color.White; }
+        Color baseColor = anim.GetColor(color);
 
         // 每次点击用不同种子 → 轨迹随机
         Random rng = new Random(unchecked(anim.RandomSeed ^ 1299709));
@@ -394,9 +399,7 @@ class PetalEffect : IClickEffect
         int cy = anim.Position.Y - screenBounds.Y;
         float t = anim.Age / (float)Duration;
 
-        Color baseColor;
-        try { baseColor = ColorTranslator.FromHtml(color.Primary); }
-        catch { baseColor = Color.White; }
+        Color baseColor = anim.GetColor(color);
 
         Random rng = new Random(unchecked(anim.RandomSeed ^ 6271));
         int petalCount = 3 + rng.Next(3);
@@ -452,6 +455,13 @@ static class EffectRegistry
         IClickEffect effect;
         _effects.TryGetValue(name, out effect);
         return effect;
+    }
+
+    public static IClickEffect GetFirst()
+    {
+        foreach (var kv in _effects)
+            return kv.Value;
+        return null;
     }
 
     public static List<string> GetAllNames()

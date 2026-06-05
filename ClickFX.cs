@@ -65,6 +65,9 @@ static class NativeMethods
     [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
     public static extern void CopyMemory(IntPtr dest, IntPtr src, uint count);
 
+    [DllImport("kernel32.dll")]
+    public static extern void RtlZeroMemory(IntPtr dest, uint count);
+
     [DllImport("winmm.dll")]
     public static extern uint timeBeginPeriod(uint uMilliseconds);
 
@@ -268,8 +271,9 @@ class OverlayManager : IDisposable
         var effectName = (button == MouseButtons.Left)
             ? Config.LeftEffect
             : Config.RightEffect;
-        var effect = EffectRegistry.Get(effectName);
-        int duration = (effect != null) ? effect.Duration : 600;
+        var effect = EffectRegistry.Get(effectName) ?? EffectRegistry.GetFirst();
+        if (effect == null) return;
+        int duration = effect.Duration;
 
         int seed;
         lock (_globalRng) { seed = _globalRng.Next(); }
@@ -279,23 +283,25 @@ class OverlayManager : IDisposable
             _animations.Add(new AnimationState
             {
                 Position = pos, Age = 0, Button = button, Duration = duration,
-                RandomSeed = seed
+                RandomSeed = seed, EffectName = effect.Name, CachedEffect = effect
             });
         }
     }
 
+    readonly List<AnimationState> _screenAnims = new List<AnimationState>();
+
     public List<AnimationState> GetAnimationsForScreen(Rectangle bounds)
     {
-        var result = new List<AnimationState>();
+        _screenAnims.Clear();
         lock (_animations)
         {
             for (int i = 0; i < _animations.Count; i++)
             {
                 if (bounds.Contains(_animations[i].Position))
-                    result.Add(_animations[i]);
+                    _screenAnims.Add(_animations[i]);
             }
         }
-        return result;
+        return _screenAnims;
     }
 
     public void Exit() { Application.ExitThread(); }
@@ -311,7 +317,12 @@ class OverlayManager : IDisposable
         _timer.Dispose();
         for (int i = _overlays.Count - 1; i >= 0; i--)
         {
-            try { _overlays[i].Dispose(); } catch { }
+            try
+            {
+                _overlays[i].ReleaseDib();
+                _overlays[i].Dispose();
+            }
+            catch { }
         }
         _overlays.Clear();
         if (_trayIcon != null)
@@ -352,6 +363,50 @@ class OverlayForm : Form
 {
     public OverlayManager Manager { get; set; }
 
+    // 缓存 DIB / DC / Graphics，避免每帧分配
+    IntPtr _cachedHBitmap, _cachedHdcMem, _cachedHdcScreen, _cachedOldObj, _cachedPBits;
+    Graphics _cachedGraphics;
+    int _cachedW, _cachedH;
+    Rectangle _prevDirty; // 脏矩形：上一帧的绘制区域
+
+    void EnsureDib(int w, int h)
+    {
+        if (_cachedHBitmap != IntPtr.Zero && _cachedW == w && _cachedH == h) return;
+        ReleaseDib();
+
+        var bih = new BITMAPINFOHEADER();
+        bih.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
+        bih.biWidth = w;
+        bih.biHeight = -h;
+        bih.biPlanes = 1;
+        bih.biBitCount = 32;
+        bih.biCompression = 0;
+
+        _cachedHBitmap = NativeMethods.CreateDIBSection(IntPtr.Zero, ref bih, 0,
+            out _cachedPBits, IntPtr.Zero, 0);
+        _cachedHdcScreen = NativeMethods.GetDC(IntPtr.Zero);
+        _cachedHdcMem = NativeMethods.CreateCompatibleDC(_cachedHdcScreen);
+        _cachedOldObj = NativeMethods.SelectObject(_cachedHdcMem, _cachedHBitmap);
+        _cachedGraphics = Graphics.FromHdc(_cachedHdcMem);
+        _cachedGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+        _cachedGraphics.CompositingQuality = CompositingQuality.HighSpeed;
+        _cachedW = w;
+        _cachedH = h;
+    }
+
+    public void ReleaseDib()
+    {
+        if (_cachedHBitmap == IntPtr.Zero) return;
+        if (_cachedGraphics != null) { _cachedGraphics.Dispose(); _cachedGraphics = null; }
+        NativeMethods.SelectObject(_cachedHdcMem, _cachedOldObj);
+        NativeMethods.DeleteDC(_cachedHdcMem);
+        NativeMethods.ReleaseDC(IntPtr.Zero, _cachedHdcScreen);
+        NativeMethods.DeleteObject(_cachedHBitmap);
+        _cachedHBitmap = IntPtr.Zero;
+        _cachedW = 0;
+        _cachedH = 0;
+    }
+
     public OverlayForm()
     {
         FormBorderStyle = FormBorderStyle.None;
@@ -391,50 +446,45 @@ class OverlayForm : Form
 
         var anims = Manager.GetAnimationsForScreen(Bounds);
 
-        var bih = new BITMAPINFOHEADER();
-        bih.biSize = (uint)Marshal.SizeOf(typeof(BITMAPINFOHEADER));
-        bih.biWidth = w;
-        bih.biHeight = -h;
-        bih.biPlanes = 1;
-        bih.biBitCount = 32;
-        bih.biCompression = 0;
+        EnsureDib(w, h);
+        if (_cachedHBitmap == IntPtr.Zero) return;
 
-        IntPtr pBits;
-        IntPtr hBitmap = NativeMethods.CreateDIBSection(IntPtr.Zero, ref bih, 0,
-            out pBits, IntPtr.Zero, 0);
-        if (hBitmap == IntPtr.Zero) return;
+        // 脏矩形：只清零动效覆盖区域 + 上一帧残留区域，避免每帧清零 8MB
+        const int MARGIN = 40;
+        Rectangle dirty = _prevDirty;
 
-        IntPtr hdcScreen = NativeMethods.GetDC(IntPtr.Zero);
-        IntPtr hdcMem = NativeMethods.CreateCompatibleDC(hdcScreen);
-        IntPtr hOld = NativeMethods.SelectObject(hdcMem, hBitmap);
-
-        using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
-        using (var g = Graphics.FromImage(bmp))
+        for (int i = 0; i < anims.Count; i++)
         {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.CompositingQuality = CompositingQuality.HighQuality;
-            g.Clear(Color.Transparent);
+            int ax = anims[i].Position.X - Left - MARGIN;
+            int ay = anims[i].Position.Y - Top - MARGIN;
+            dirty = Rectangle.Union(dirty, new Rectangle(ax, ay, MARGIN * 2, MARGIN * 2));
+        }
 
+        dirty.Intersect(new Rectangle(0, 0, w, h));
+        if (!dirty.IsEmpty)
+        {
+            // 按 full-width 行清零，一次 P/Invoke 调用
+            int stride = w * 4;
+            IntPtr start = _cachedPBits + dirty.Y * stride;
+            uint bytes = (uint)(dirty.Height * stride);
+            NativeMethods.RtlZeroMemory(start, bytes);
+        }
+
+        if (anims.Count > 0)
+        {
+            _cachedGraphics.ResetClip();
             for (int i = 0; i < anims.Count; i++)
             {
                 var color = (anims[i].Button == MouseButtons.Left)
                     ? Manager.Config.LeftClick
                     : Manager.Config.RightClick;
-                var effectName = (anims[i].Button == MouseButtons.Left)
-                    ? Manager.Config.LeftEffect
-                    : Manager.Config.RightEffect;
-                var effect = EffectRegistry.Get(effectName);
+                var effect = anims[i].CachedEffect;
                 if (effect != null)
-                    effect.Draw(g, anims[i], color, Bounds);
+                    effect.Draw(_cachedGraphics, anims[i], color, Bounds);
             }
-
-            var bmpData = bmp.LockBits(
-                new Rectangle(0, 0, w, h),
-                ImageLockMode.ReadOnly,
-                PixelFormat.Format32bppArgb);
-            NativeMethods.CopyMemory(pBits, bmpData.Scan0, (uint)(w * h * 4));
-            bmp.UnlockBits(bmpData);
         }
+
+        _prevDirty = dirty;
 
         var pptDst = new POINT { X = Left, Y = Top };
         var size = new SIZE { cx = w, cy = h };
@@ -445,12 +495,7 @@ class OverlayForm : Form
         blend.SourceConstantAlpha = 255;
         blend.AlphaFormat = WinConsts.AC_SRC_ALPHA;
 
-        NativeMethods.UpdateLayeredWindow(Handle, hdcScreen, ref pptDst, ref size,
-            hdcMem, ref pptSrc, 0, ref blend, WinConsts.ULW_ALPHA);
-
-        NativeMethods.SelectObject(hdcMem, hOld);
-        NativeMethods.DeleteDC(hdcMem);
-        NativeMethods.ReleaseDC(IntPtr.Zero, hdcScreen);
-        NativeMethods.DeleteObject(hBitmap);
+        NativeMethods.UpdateLayeredWindow(Handle, _cachedHdcScreen, ref pptDst, ref size,
+            _cachedHdcMem, ref pptSrc, 0, ref blend, WinConsts.ULW_ALPHA);
     }
 }
