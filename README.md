@@ -63,6 +63,14 @@
 
 ---
 
+## 🙏 致谢
+
+灵感来自 [ClickShow](https://github.com/cuiliang/ClickShow) — cuiliang 大佬的鼠标点击效果工具，在此致敬！
+
+顺带一提，cuiliang 也是 [Quicker](https://getquicker.net/) 的作者，这是我认为目前最好用的效率工具软件，强烈推荐！
+
+---
+
 ## ❤️ 支持作者
 
 如果 ClickFX 帮到了你，欢迎扫码支持一下，多少都是鼓励！感谢您的支持 💪

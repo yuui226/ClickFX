@@ -2,6 +2,7 @@
 // 环境：.NET Framework 4.8 / STA
 
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -9,9 +10,15 @@ static class Program
 {
     static Mutex _mutex;
 
+    [DllImport("user32.dll")]
+    static extern bool SetProcessDPIAware();
+
     [STAThread]
     static void Main()
     {
+        // 声明 DPI 感知，确保鼠标坐标和窗口坐标一致
+        SetProcessDPIAware();
+
         bool createdNew;
         _mutex = new Mutex(true, "ClickFX_SingleInstance", out createdNew);
         if (!createdNew)
