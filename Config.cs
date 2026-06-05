@@ -353,13 +353,13 @@ class ConfigForm : Form
 
         _projectLink = new LinkLabel
         {
-            Text = "GitHub: https://github.com/HUYUSHII/ClickFX",
+            Text = "GitHub: https://github.com/yuui226/ClickFX",
             Location = new Point(15, y),
             Size = new Size(340, 18),
             AutoSize = false
         };
         _projectLink.LinkClicked += (s, e) =>
-            System.Diagnostics.Process.Start("https://github.com/HUYUSHII/ClickFX");
+            System.Diagnostics.Process.Start("https://github.com/yuui226/ClickFX");
         Controls.Add(_projectLink);
         y += 25;
 

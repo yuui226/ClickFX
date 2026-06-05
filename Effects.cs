@@ -71,8 +71,22 @@ class LineBurstEffect : IClickEffect
 
     const float EraseDistance = 13f;
     static readonly float[] LineLengths = { 10f, 11f, 10f };
-    static readonly float[] LineAngles = { 258f, 222f, 187f };
     static readonly float[] LineDelays = { 0f, 0.0375f, 0.075f };
+    static readonly float[] DirX, DirY;
+    static readonly float PI = (float)Math.PI;
+
+    static LineBurstEffect()
+    {
+        float[] angles = { 258f, 222f, 187f };
+        DirX = new float[3];
+        DirY = new float[3];
+        for (int i = 0; i < 3; i++)
+        {
+            float rad = angles[i] * PI / 180f;
+            DirX[i] = (float)Math.Cos(rad);
+            DirY[i] = (float)Math.Sin(rad);
+        }
+    }
 
     Pen _linePen = new Pen(Color.Black, 3f);
     Pen _glowPen = new Pen(Color.Black, 1.5f);
@@ -100,9 +114,8 @@ class LineBurstEffect : IClickEffect
                 (progress - LineDelays[i]) / (1f - LineDelays[i])));
             if (lineProgress <= 0f) continue;
 
-            float angleRad = LineAngles[i] * (float)Math.PI / 180f;
-            float dirX = (float)Math.Cos(angleRad);
-            float dirY = (float)Math.Sin(angleRad);
+            float dirX = DirX[i];
+            float dirY = DirY[i];
 
             float alpha;
             float startDist, endDist;
