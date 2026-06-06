@@ -6,6 +6,7 @@ using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 // ==================== 配置模型 ====================
 
@@ -18,6 +19,9 @@ class AppConfig
     public ColorConfig RightClick { get; set; }
     public string InfoText { get; set; }
     public string InfoUrl { get; set; }
+    public bool AutoStart { get; set; }
+    public int HotkeyModifiers { get; set; }
+    public int HotkeyKey { get; set; }
 
     public AppConfig()
     {
@@ -28,6 +32,9 @@ class AppConfig
         RightClick = new ColorConfig("#FF6060");
         InfoText = "";
         InfoUrl = "";
+        AutoStart = false;
+        HotkeyModifiers = 0;
+        HotkeyKey = 0;
     }
 }
 
@@ -87,6 +94,41 @@ static class ConfigManager
         catch { }
     }
 
+    const string AutoStartKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    const string AppName = "ClickFX";
+
+    public static bool GetAutoStart()
+    {
+        try
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(AutoStartKey, false))
+            {
+                return key.GetValue(AppName) != null;
+            }
+        }
+        catch { return false; }
+    }
+
+    public static void SetAutoStart(bool enable)
+    {
+        try
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(AutoStartKey, true))
+            {
+                if (key == null) return;
+                if (enable)
+                {
+                    key.SetValue(AppName, "\"" + Application.ExecutablePath + "\"");
+                }
+                else
+                {
+                    key.DeleteValue(AppName, false);
+                }
+            }
+        }
+        catch { }
+    }
+
     // ==================== 手动 JSON 序列化 ====================
 
     static string SerializeConfig(AppConfig c)
@@ -98,7 +140,10 @@ static class ConfigManager
             + "  \"LeftClick\": " + SerializeColor(c.LeftClick) + ",\n"
             + "  \"RightClick\": " + SerializeColor(c.RightClick) + ",\n"
             + "  \"InfoText\": " + Quote(c.InfoText ?? "") + ",\n"
-            + "  \"InfoUrl\": " + Quote(c.InfoUrl ?? "") + "\n"
+            + "  \"InfoUrl\": " + Quote(c.InfoUrl ?? "") + ",\n"
+            + "  \"AutoStart\": " + (c.AutoStart ? "true" : "false") + ",\n"
+            + "  \"HotkeyModifiers\": " + c.HotkeyModifiers + ",\n"
+            + "  \"HotkeyKey\": " + c.HotkeyKey + "\n"
             + "}";
     }
 
@@ -137,6 +182,13 @@ static class ConfigManager
             c.InfoText = d["InfoText"];
         if (d.ContainsKey("InfoUrl"))
             c.InfoUrl = d["InfoUrl"];
+        if (d.ContainsKey("AutoStart"))
+            c.AutoStart = d["AutoStart"].ToLower() == "true";
+        int n;
+        if (d.ContainsKey("HotkeyModifiers") && int.TryParse(d["HotkeyModifiers"], out n))
+            c.HotkeyModifiers = n;
+        if (d.ContainsKey("HotkeyKey") && int.TryParse(d["HotkeyKey"], out n))
+            c.HotkeyKey = n;
 
         return c;
     }
@@ -258,7 +310,12 @@ class ConfigForm : Form
     Button _leftPick, _rightPick;
     LinkLabel _projectLink;
 
+    CheckBox _autoStartCheckBox;
+    TextBox _hotkeyTextBox;
+    Button _hotkeyClearBtn;
+
     AppConfig _originalConfig;
+    int _hotkeyModifiers, _hotkeyKey;
 
     public ConfigForm(AppConfig config)
     {
@@ -275,7 +332,7 @@ class ConfigForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(380, 290);
+        ClientSize = new Size(380, 380);
 
         int y = 15;
 
@@ -331,6 +388,34 @@ class ConfigForm : Form
         _leftHex.Leave += (s, e) => NormalizeHex(_leftHex);
         _rightHex.Leave += (s, e) => NormalizeHex(_rightHex);
 
+        // 开机启动
+        _autoStartCheckBox = new CheckBox
+        {
+            Text = "开机自启动",
+            Location = new Point(15, y),
+            AutoSize = true
+        };
+        Controls.Add(_autoStartCheckBox);
+        y += 30;
+
+        // 快捷键
+        Controls.Add(new Label { Text = "快捷键：", Location = new Point(15, y + 3), AutoSize = true });
+        _hotkeyTextBox = new TextBox
+        {
+            Location = new Point(80, y),
+            Size = new Size(190, 22),
+            ReadOnly = true,
+            BackColor = SystemColors.Window
+        };
+        _hotkeyTextBox.KeyDown += HotkeyTextBox_KeyDown;
+        _hotkeyTextBox.GotFocus += (s, e) => _hotkeyTextBox.BackColor = SystemColors.Info;
+        _hotkeyTextBox.LostFocus += (s, e) => _hotkeyTextBox.BackColor = SystemColors.Window;
+        Controls.Add(_hotkeyTextBox);
+        _hotkeyClearBtn = new Button { Text = "清除", Location = new Point(278, y - 1), Size = new Size(60, 24) };
+        _hotkeyClearBtn.Click += (s, e) => { _hotkeyModifiers = 0; _hotkeyKey = 0; _hotkeyTextBox.Text = ""; };
+        Controls.Add(_hotkeyClearBtn);
+        y += 35;
+
         // 恢复默认
         var resetBtn = new Button { Text = "恢复默认", Location = new Point(15, y), Size = new Size(80, 28) };
         resetBtn.Click += (s, e) => LoadValues(new AppConfig());
@@ -371,6 +456,36 @@ class ConfigForm : Form
         CancelButton = cancelBtn;
     }
 
+    void HotkeyTextBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        e.SuppressKeyPress = true;
+        e.Handled = true;
+
+        // 至少需要一个修饰键
+        if (!e.Control && !e.Alt && !e.Shift) return;
+
+        int mods = 0;
+        if (e.Alt) mods |= 0x0001;    // MOD_ALT
+        if (e.Control) mods |= 0x0002; // MOD_CTRL
+        if (e.Shift) mods |= 0x0004;   // MOD_SHIFT
+
+        int key = (int)e.KeyCode;
+        _hotkeyModifiers = mods;
+        _hotkeyKey = key;
+        _hotkeyTextBox.Text = HotkeyToString(mods, key);
+    }
+
+    static string HotkeyToString(int mods, int key)
+    {
+        if (mods == 0 && key == 0) return "";
+        var parts = new List<string>();
+        if ((mods & 0x0002) != 0) parts.Add("Ctrl");
+        if ((mods & 0x0001) != 0) parts.Add("Alt");
+        if ((mods & 0x0004) != 0) parts.Add("Shift");
+        parts.Add(((Keys)key).ToString());
+        return string.Join("+", parts);
+    }
+
     void LoadValues(AppConfig config)
     {
         if (_leftEffectCombo.Items.Contains(config.LeftEffect))
@@ -385,6 +500,11 @@ class ConfigForm : Form
 
         _leftHex.Text = config.LeftClick.Primary;
         _rightHex.Text = config.RightClick.Primary;
+
+        _autoStartCheckBox.Checked = config.AutoStart;
+        _hotkeyModifiers = config.HotkeyModifiers;
+        _hotkeyKey = config.HotkeyKey;
+        _hotkeyTextBox.Text = HotkeyToString(_hotkeyModifiers, _hotkeyKey);
     }
 
     void ApplyValues()
@@ -398,6 +518,12 @@ class ConfigForm : Form
         Result.RightClick.GlowIntensity = _originalConfig.RightClick.GlowIntensity;
         Result.InfoText = _originalConfig.InfoText;
         Result.InfoUrl = _originalConfig.InfoUrl;
+        Result.AutoStart = _autoStartCheckBox.Checked;
+        Result.HotkeyModifiers = _hotkeyModifiers;
+        Result.HotkeyKey = _hotkeyKey;
+
+        // 同步开机自启动注册表
+        ConfigManager.SetAutoStart(Result.AutoStart);
     }
 
     void PickColor(TextBox hexBox, Panel preview)

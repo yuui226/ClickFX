@@ -37,6 +37,10 @@ static class Program
         EffectRegistry.Register(new StarEffect());
         EffectRegistry.Register(new PetalEffect());
 
+        // 同步开机自启动注册表
+        var config = ConfigManager.Load();
+        ConfigManager.SetAutoStart(config.AutoStart);
+
         var manager = new OverlayManager();
         manager.Start();
 

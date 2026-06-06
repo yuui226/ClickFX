@@ -67,6 +67,12 @@ static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern bool DestroyIcon(IntPtr hIcon);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 }
 
 public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -119,6 +125,7 @@ static class WinConsts
     public const int WH_MOUSE_LL = 14;
     public const int WM_LBUTTONUP = 0x0202;
     public const int WM_RBUTTONUP = 0x0205;
+    public const int WM_HOTKEY = 0x0312;
     public const int WS_EX_LAYERED = 0x00080000;
     public const int WS_EX_TRANSPARENT = 0x00000020;
     public const int WS_EX_TOPMOST = 0x00000008;
@@ -128,6 +135,59 @@ static class WinConsts
     public const int ULW_ALPHA = 0x00000002;
     public const byte AC_SRC_ALPHA = 0x01;
     public const byte AC_SRC_OVER = 0x00;
+}
+
+// ==================== 热键消息窗口 ====================
+
+class HotkeyForm : Form
+{
+    public Action OnHotkeyPressed;
+
+    const int HOTKEY_ID = 1;
+
+    public bool RegisterHotkey(int modifiers, int key)
+    {
+        UnregisterHotkey();
+        if (modifiers != 0 && key != 0)
+            return NativeMethods.RegisterHotKey(Handle, HOTKEY_ID, modifiers, key);
+        return true;
+    }
+
+    public void UnregisterHotkey()
+    {
+        NativeMethods.UnregisterHotKey(Handle, HOTKEY_ID);
+    }
+
+    // 创建句柄但不显示窗口
+    public void EnsureHandle()
+    {
+        var _ = Handle;
+    }
+
+    protected override void SetVisibleCore(bool value)
+    {
+        // 始终隐藏，不响应 Show()
+        base.SetVisibleCore(false);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WinConsts.WM_HOTKEY && (int)m.WParam == HOTKEY_ID)
+        {
+            if (OnHotkeyPressed != null) OnHotkeyPressed();
+        }
+        base.WndProc(ref m);
+    }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x80; // WS_EX_TOOLWINDOW — 不在任务栏显示
+            return cp;
+        }
+    }
 }
 
 // ==================== Overlay 管理器 ====================
@@ -141,6 +201,9 @@ class OverlayManager : IDisposable
     IntPtr _hookId = IntPtr.Zero;
     LowLevelMouseProc _hookProc;
     NotifyIcon _trayIcon;
+    ToolStripMenuItem _toggleItem;
+    HotkeyForm _hotkeyForm;
+    bool _enabled = true;
 
     public AppConfig Config { get; private set; }
 
@@ -161,6 +224,10 @@ class OverlayManager : IDisposable
         _trayIcon.Visible = true;
 
         var menu = new ContextMenuStrip();
+
+        _toggleItem = new ToolStripMenuItem("暂停");
+        _toggleItem.Click += (s, e) => ToggleEnabled();
+        menu.Items.Add(_toggleItem);
 
         var settingsItem = new ToolStripMenuItem("设置");
         settingsItem.Click += (s, e) => OpenSettings();
@@ -183,6 +250,12 @@ class OverlayManager : IDisposable
             _overlays.Add(form);
         }
 
+        // 热键窗口（只创建句柄，不显示）
+        _hotkeyForm = new HotkeyForm();
+        _hotkeyForm.EnsureHandle();
+        _hotkeyForm.OnHotkeyPressed = ToggleEnabled;
+        ApplyHotkey();
+
         _hookProc = HookCallback;
         using (var process = Process.GetCurrentProcess())
         using (var module = process.MainModule)
@@ -194,6 +267,25 @@ class OverlayManager : IDisposable
         _timer.Start();
     }
 
+    void ToggleEnabled()
+    {
+        _enabled = !_enabled;
+        _toggleItem.Text = _enabled ? "暂停" : "启用";
+    }
+
+    void ApplyHotkey()
+    {
+        if (_hotkeyForm == null) return;
+        if (Config.HotkeyModifiers != 0 && Config.HotkeyKey != 0)
+        {
+            if (!_hotkeyForm.RegisterHotkey(Config.HotkeyModifiers, Config.HotkeyKey))
+            {
+                MessageBox.Show("快捷键注册失败，可能已被其他程序占用。", "ClickFX",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+    }
+
     void OpenSettings()
     {
         using (var form = new ConfigForm(Config))
@@ -202,6 +294,7 @@ class OverlayManager : IDisposable
             {
                 Config = form.Result;
                 ConfigManager.Save(Config);
+                ApplyHotkey();
             }
         }
     }
@@ -230,7 +323,7 @@ class OverlayManager : IDisposable
 
     IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0)
+        if (nCode >= 0 && _enabled)
         {
             var info = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(
                 lParam, typeof(MSLLHOOKSTRUCT));
@@ -303,6 +396,12 @@ class OverlayManager : IDisposable
         {
             NativeMethods.UnhookWindowsHookEx(_hookId);
             _hookId = IntPtr.Zero;
+        }
+        if (_hotkeyForm != null)
+        {
+            _hotkeyForm.UnregisterHotkey();
+            try { _hotkeyForm.Dispose(); } catch { }
+            _hotkeyForm = null;
         }
         _timer.Stop();
         _timer.Dispose();
