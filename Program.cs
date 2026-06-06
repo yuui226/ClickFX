@@ -36,6 +36,11 @@ static class Program
         EffectRegistry.Register(new SparkEffect());
         EffectRegistry.Register(new StarEffect());
         EffectRegistry.Register(new PetalEffect());
+        EffectRegistry.Register(new VortexEffect());
+        EffectRegistry.Register(new FragmentEffect());
+        EffectRegistry.Register(new MeteorEffect());
+        EffectRegistry.Register(new LightningEffect());
+        EffectRegistry.Register(new FingerEffect());
 
         // 同步开机自启动注册表
         var config = ConfigManager.Load();

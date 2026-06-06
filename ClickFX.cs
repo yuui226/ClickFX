@@ -535,7 +535,8 @@ class OverlayForm : Form
         if (_cachedHBitmap == IntPtr.Zero) return;
 
         // 脏矩形 = 上一帧动效区域 ∪ 当前帧动效区域（不含历史，避免无限增长）
-        const int BASE_MARGIN = 40;
+        // 覆盖最大效果范围：手指 emoji 对角线(~117) + 远端距离(55) + 指尖偏移(~76) ≈ 190
+        const int BASE_MARGIN = 200;
         Rectangle dirty = _prevAnimArea;
         Rectangle curAnimArea = Rectangle.Empty;
 

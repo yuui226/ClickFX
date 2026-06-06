@@ -491,7 +491,7 @@ class ConfigForm : Form
 
         var donateLabel = new Label
         {
-            Text = "欢迎在 GitHub 扫码支持，多少都是鼓励，万分感谢",
+            Text = "欢迎在 GitHub 给项目点个 Star",
             Location = new Point(12, y),
             Size = new Size(310, 18),
             ForeColor = SystemColors.GrayText

@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Windows.Forms;
 
 // ==================== 接口 ====================
@@ -157,7 +158,9 @@ class LineBurstEffect : IClickEffect
 
             int a = (int)(255 * alpha);
             _linePen.Color = Color.FromArgb(a, baseColor);
+            _linePen.Width = 3f * scale;
             _glowPen.Color = Color.FromArgb((int)(a * glowIntensity), baseColor);
+            _glowPen.Width = 1.5f * scale;
 
             float sx = cx + dirX * startDist;
             float sy = cy + dirY * startDist;
@@ -521,6 +524,799 @@ class PetalEffect : IClickEffect
             g.FillEllipse(_petalBrush, -hl, -hw, hl * 2, hw * 2);
 
             g.Restore(state);
+        }
+    }
+}
+
+// ==================== 效果：漩涡 ====================
+
+class VortexEffect : IClickEffect
+{
+    public string Name { get { return "漩涡"; } }
+    public int Duration { get { return 400; } }
+
+    const int ParticleCount = 6;
+    const float MaxRadius = 22f;
+
+    class Data
+    {
+        public float[] InitAngles;
+        public float[] SpiralSpeeds;
+        public float[] Sizes;
+        public float[] Bris;
+        public float[] Directions;
+    }
+
+    SolidBrush _brush = new SolidBrush(Color.Black);
+
+    public void Cleanup()
+    {
+        _brush.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float t = anim.Age / (float)Duration;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 31415));
+            data = new Data
+            {
+                InitAngles = new float[ParticleCount],
+                SpiralSpeeds = new float[ParticleCount],
+                Sizes = new float[ParticleCount],
+                Bris = new float[ParticleCount],
+                Directions = new float[ParticleCount],
+            };
+            for (int i = 0; i < ParticleCount; i++)
+            {
+                data.InitAngles[i] = (float)(rng.NextDouble() * Math.PI * 2);
+                data.SpiralSpeeds[i] = 4f + (float)(rng.NextDouble() * 5f);
+                data.Sizes[i] = 2f + (float)(rng.NextDouble() * 2f);
+                data.Bris[i] = 0.7f + (float)(rng.NextDouble() * 0.3f);
+                data.Directions[i] = (rng.Next(2) == 0) ? 1f : -1f;
+            }
+            anim.EffectData = data;
+        }
+
+        float alpha = 1f - Easing.EaseInQuad(t);
+        if (alpha <= 0f) return;
+
+        float scale = anim.Scale;
+        float radius = MaxRadius * scale * Easing.EaseOutQuad(t);
+
+        for (int i = 0; i < ParticleCount; i++)
+        {
+            float bri = data.Bris[i];
+            float baseSize = data.Sizes[i] * scale;
+
+            // 绘制拖尾（3 个历史位置）
+            for (int trail = 3; trail >= 0; trail--)
+            {
+                float trailT = Math.Max(0f, t - trail * 0.04f);
+                float trailAngle = data.InitAngles[i] + data.Directions[i] * data.SpiralSpeeds[i] * trailT;
+                float trailRadius = MaxRadius * scale * Easing.EaseOutQuad(trailT);
+
+                float px = cx + (float)Math.Cos(trailAngle) * trailRadius;
+                float py = cy + (float)Math.Sin(trailAngle) * trailRadius;
+
+                float trailAlpha = alpha * (1f - trail * 0.25f);
+                float size = baseSize * (1f - trail * 0.15f) * (1f - Easing.EaseInQuad(t));
+
+                int a = (int)(255 * trailAlpha * bri);
+                _brush.Color = Color.FromArgb(a,
+                    Math.Min(255, (int)(baseColor.R * bri)),
+                    Math.Min(255, (int)(baseColor.G * bri)),
+                    Math.Min(255, (int)(baseColor.B * bri)));
+                g.FillEllipse(_brush, px - size, py - size, size * 2, size * 2);
+            }
+        }
+    }
+}
+
+// ==================== 效果：碎片 ====================
+
+class FragmentEffect : IClickEffect
+{
+    public string Name { get { return "碎片"; } }
+    public int Duration { get { return 500; } }
+
+    const int FragCount = 8;
+    const float Gravity = 120f;   // 重力加速度（像素/s²，相对 1x 缩放）
+
+    class Data
+    {
+        public float[] FragAngle;    // 初始飞出方向
+        public float[] FragSpeed;    // 飞出速度
+        public float[] FragRot;      // 旋转角速度（度/s）
+        public float[] FragSize;     // 基础尺寸
+        public float[] FragBri;      // 亮度
+        public float[] FragShape;    // 0-1 选择三角/四边形
+        public float GravityDirX;    // 重力方向（随机偏一点）
+        public float GravityDirY;
+    }
+
+    SolidBrush _brush = new SolidBrush(Color.Black);
+
+    static readonly float PI = (float)Math.PI;
+
+    public void Cleanup()
+    {
+        _brush.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float t = anim.Age / (float)Duration;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 2718));
+
+            // 重力方向：大致向下，随机偏一点
+            float gravAngle = PI * 0.5f + (float)((rng.NextDouble() - 0.5) * 0.6f);
+
+            data = new Data
+            {
+                FragAngle = new float[FragCount],
+                FragSpeed = new float[FragCount],
+                FragRot = new float[FragCount],
+                FragSize = new float[FragCount],
+                FragBri = new float[FragCount],
+                FragShape = new float[FragCount],
+                GravityDirX = (float)Math.Cos(gravAngle),
+                GravityDirY = (float)Math.Sin(gravAngle),
+            };
+            for (int i = 0; i < FragCount; i++)
+            {
+                data.FragAngle[i] = (float)(rng.NextDouble() * PI * 2);
+                data.FragSpeed[i] = 25f + (float)(rng.NextDouble() * 35f);
+                data.FragRot[i] = (float)((rng.NextDouble() - 0.5) * 500f);
+                data.FragSize[i] = 3f + (float)(rng.NextDouble() * 3f);
+                data.FragBri[i] = 0.7f + (float)(rng.NextDouble() * 0.3f);
+                data.FragShape[i] = (float)rng.NextDouble();
+            }
+            anim.EffectData = data;
+        }
+
+        // ---- 碎片阶段 ----
+        float fragT = Math.Max(0f, (t - 0.15f) / 0.85f);
+        if (fragT > 0f)
+        {
+            float fragAlpha = 1f - Easing.EaseInQuad(fragT);
+            if (fragAlpha <= 0f) return;
+
+            float time = fragT * Duration / 1000f; // 转秒
+
+            for (int i = 0; i < FragCount; i++)
+            {
+                float bri = data.FragBri[i];
+                float vx = (float)Math.Cos(data.FragAngle[i]) * data.FragSpeed[i];
+                float vy = (float)Math.Sin(data.FragAngle[i]) * data.FragSpeed[i];
+
+                // 抛物线运动：位置 = 初速度*t + 0.5*重力*t²
+                float px = cx + (vx * time + 0.5f * data.GravityDirX * Gravity * time * time) * scale;
+                float py = cy + (vy * time + 0.5f * data.GravityDirY * Gravity * time * time) * scale;
+
+                float rot = data.FragRot[i] * time;
+                float sz = data.FragSize[i] * scale * (0.8f + 0.2f * fragAlpha);
+                if (sz < 0.5f) continue;
+
+                int a = (int)(255 * fragAlpha * bri);
+                _brush.Color = Color.FromArgb(a,
+                    Math.Min(255, (int)(baseColor.R * bri)),
+                    Math.Min(255, (int)(baseColor.G * bri)),
+                    Math.Min(255, (int)(baseColor.B * bri)));
+
+                GraphicsState state = g.Save();
+                g.TranslateTransform(px, py);
+                g.RotateTransform(rot);
+
+                // 不规则多边形：三角形或四边形
+                if (data.FragShape[i] < 0.5f)
+                {
+                    // 三角形
+                    PointF[] tri = {
+                        new PointF(0, -sz),
+                        new PointF(-sz * 0.7f, sz * 0.6f),
+                        new PointF(sz * 0.8f, sz * 0.5f),
+                    };
+                    g.FillPolygon(_brush, tri);
+                }
+                else
+                {
+                    // 不规则四边形
+                    float skew = 0.4f + data.FragShape[i] * 0.4f;
+                    PointF[] quad = {
+                        new PointF(-sz * 0.6f, -sz),
+                        new PointF(sz, -sz * skew),
+                        new PointF(sz * 0.7f, sz * 0.8f),
+                        new PointF(-sz * 0.8f, sz * 0.6f),
+                    };
+                    g.FillPolygon(_brush, quad);
+                }
+
+                g.Restore(state);
+            }
+        }
+
+        // ---- 命中闪光 ----
+        if (t < 0.12f)
+        {
+            float flashT = t / 0.12f;
+            float flashSize = 6f * scale * flashT;
+            int flashA = (int)(200 * (1f - flashT));
+            _brush.Color = Color.FromArgb(flashA, baseColor);
+            g.FillEllipse(_brush, cx - flashSize, cy - flashSize, flashSize * 2, flashSize * 2);
+        }
+    }
+}
+
+// ==================== 效果：流星 ====================
+
+class MeteorEffect : IClickEffect
+{
+    public string Name { get { return "流星"; } }
+    public int Duration { get { return 400; } }
+
+    const float StartDist = 65f;
+    const int TrailSegments = 12;
+    const float TrailDuration = 0.2f;  // 拖尾覆盖的时间跨度
+    const int SparkCount = 5;
+
+    class Data
+    {
+        // 轨迹控制点（贝塞尔）
+        public float P0X, P0Y;  // 起点
+        public float P1X, P1Y;  // 控制点
+        public float P2X, P2Y;  // 终点（点击处）
+        // 头部
+        public float HeadSize;
+        // 尾部粒子
+        public float[] SparkAngle;
+        public float[] SparkSpeed;
+        public float[] SparkSize;
+    }
+
+    Pen _trailPen = new Pen(Color.Black, 2f);
+    Pen _glowPen = new Pen(Color.Black, 4f);
+    SolidBrush _headBrush = new SolidBrush(Color.Black);
+    SolidBrush _sparkBrush = new SolidBrush(Color.Black);
+
+    static readonly float PI = (float)Math.PI;
+
+    public void Cleanup()
+    {
+        _trailPen.Dispose();
+        _glowPen.Dispose();
+        _headBrush.Dispose();
+        _sparkBrush.Dispose();
+    }
+
+    // 贝塞尔插值
+    static float Bezier(float p0, float p1, float p2, float t)
+    {
+        float om = 1f - t;
+        return om * om * p0 + 2f * om * t * p1 + t * t * p2;
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 1618));
+            float angle = (float)(rng.NextDouble() * PI * 2);
+            float cosA = (float)Math.Cos(angle);
+            float sinA = (float)Math.Sin(angle);
+            float cosP = (float)Math.Cos(angle + PI / 2f);
+            float sinP = (float)Math.Sin(angle + PI / 2f);
+
+            float startX = cosA * StartDist;
+            float startY = sinA * StartDist;
+
+            // 控制点：在中点附近偏移，产生弧线
+            float curve = (float)((rng.NextDouble() - 0.5) * 2f * 25f);
+            float midX = startX * 0.5f + cosP * curve;
+            float midY = startY * 0.5f + sinP * curve;
+
+            data = new Data
+            {
+                P0X = startX, P0Y = startY,
+                P1X = midX, P1Y = midY,
+                P2X = 0, P2Y = 0,
+                HeadSize = 2.5f + (float)(rng.NextDouble() * 1.5f),
+                SparkAngle = new float[SparkCount],
+                SparkSpeed = new float[SparkCount],
+                SparkSize = new float[SparkCount],
+            };
+            for (int i = 0; i < SparkCount; i++)
+            {
+                data.SparkAngle[i] = (float)(rng.NextDouble() * PI * 2);
+                data.SparkSpeed[i] = 15f + (float)(rng.NextDouble() * 20f);
+                data.SparkSize[i] = 1f + (float)(rng.NextDouble() * 1.5f);
+            }
+            anim.EffectData = data;
+        }
+
+        float t = anim.Age / (float)Duration;
+        float alpha = 1f - Easing.EaseInQuad(t);
+        if (alpha <= 0f) return;
+
+        // 飞行阶段 0~0.4，命中爆发 0.4~1.0
+        float flyT = Math.Min(1f, t / 0.4f);
+        float moveT = Easing.EaseInQuad(flyT);
+
+        // 头部当前位置
+        float headX = cx + Bezier(data.P0X, data.P1X, data.P2X, moveT) * scale;
+        float headY = cy + Bezier(data.P0Y, data.P1Y, data.P2Y, moveT) * scale;
+
+        // ---- 多段渐隐拖尾 ----
+        for (int i = 0; i < TrailSegments; i++)
+        {
+            float segT = moveT - (float)i / TrailSegments * TrailDuration;
+            if (segT < 0f) continue;
+
+            float segAlpha = 1f - (float)i / TrailSegments;
+            int a = (int)(255 * alpha * segAlpha * segAlpha);
+            if (a <= 0) continue;
+
+            float sx = cx + Bezier(data.P0X, data.P1X, data.P2X, segT) * scale;
+            float sy = cy + Bezier(data.P0Y, data.P1Y, data.P2Y, segT) * scale;
+            float ex = cx + Bezier(data.P0X, data.P1X, data.P2X,
+                Math.Max(0f, segT - TrailDuration / TrailSegments)) * scale;
+            float ey = cy + Bezier(data.P0Y, data.P1Y, data.P2Y,
+                Math.Max(0f, segT - TrailDuration / TrailSegments)) * scale;
+
+            float width = (2.5f - 1.8f * (float)i / TrailSegments) * scale;
+            _trailPen.Color = Color.FromArgb(a, baseColor);
+            _trailPen.Width = width;
+            g.DrawLine(_trailPen, sx, sy, ex, ey);
+        }
+
+        // ---- 头部辉光 ----
+        if (flyT < 1f)
+        {
+            float headA = alpha * (1f - flyT * 0.3f);
+            int ha = (int)(255 * headA);
+            float glowSize = data.HeadSize * 2.5f * scale;
+            _glowPen.Color = Color.FromArgb((int)(ha * 0.4f), baseColor);
+            _glowPen.Width = glowSize;
+            g.DrawLine(_glowPen, headX, headY, headX + 0.1f, headY);
+
+            float hs = data.HeadSize * scale;
+            _headBrush.Color = Color.FromArgb(ha, Color.White);
+            g.FillEllipse(_headBrush, headX - hs, headY - hs, hs * 2, hs * 2);
+            _headBrush.Color = Color.FromArgb(ha, baseColor);
+            float inner = hs * 0.6f;
+            g.FillEllipse(_headBrush, headX - inner, headY - inner, inner * 2, inner * 2);
+        }
+
+        // ---- 命中爆发粒子 ----
+        if (flyT >= 1f)
+        {
+            float burstT = (t - 0.4f) / 0.6f;
+            float burstAlpha = 1f - Easing.EaseInQuad(burstT);
+            if (burstAlpha > 0f)
+            {
+                int ba = (int)(255 * burstAlpha * alpha);
+                float dist = 20f * scale * Easing.EaseOutQuad(burstT);
+
+                for (int i = 0; i < SparkCount; i++)
+                {
+                    float spx = cx + (float)Math.Cos(data.SparkAngle[i]) * dist;
+                    float spy = cy + (float)Math.Sin(data.SparkAngle[i]) * dist;
+                    float sz = data.SparkSize[i] * scale * (1f - burstT);
+                    if (sz < 0.3f) continue;
+
+                    _sparkBrush.Color = Color.FromArgb(ba, baseColor);
+                    g.FillEllipse(_sparkBrush, spx - sz, spy - sz, sz * 2, sz * 2);
+                }
+
+                // 命中闪光圈
+                float ringSize = 8f * scale * burstT;
+                float ringAlpha = burstAlpha * 0.5f;
+                _glowPen.Color = Color.FromArgb((int)(255 * ringAlpha), baseColor);
+                _glowPen.Width = 2f * scale * burstAlpha;
+                g.DrawEllipse(_glowPen, cx - ringSize, cy - ringSize, ringSize * 2, ringSize * 2);
+            }
+        }
+    }
+}
+
+// ==================== 效果：手指 ====================
+
+class FingerEffect : IClickEffect
+{
+    public string Name { get { return "手指"; } }
+    public int Duration { get { return 500; } }
+
+    const float StartDist = 55f;
+    const float EmojiSize = 64f;     // 渲染分辨率（越大越清晰）
+    const float DisplayScale = 0.45f; // 显示缩放（控制实际显示大小）
+    static readonly float PI = (float)Math.PI;
+
+    class Data
+    {
+        public float Angle;
+        public float RotationDeg;
+        public Bitmap EmojiBmp;
+    }
+
+    System.Drawing.Imaging.ImageAttributes _imgAttrs;
+    readonly float[][] _matrixItems = {
+        new float[] {1, 0, 0, 0, 0},
+        new float[] {0, 1, 0, 0, 0},
+        new float[] {0, 0, 1, 0, 0},
+        new float[] {0, 0, 0, 1, 0},
+        new float[] {0, 0, 0, 0, 1},
+    };
+
+    public void Cleanup()
+    {
+        if (_imgAttrs != null) _imgAttrs.Dispose();
+        // EffectData 中的 EmojiBmp 由 EffectRegistry.Cleanup 间接触发
+        // 但 EffectData 是 object 类型，这里无法直接访问
+        // Bitmap 会在 GC 时回收，此处不阻塞
+    }
+
+    Bitmap RenderEmoji(float size)
+    {
+        using (var font = new Font("Segoe UI Emoji", size, GraphicsUnit.Pixel))
+        {
+            string emoji = "👆";
+            var measured = TextRenderer.MeasureText(emoji, font);
+            int w = measured.Width + 4;
+            int h = measured.Height + 4;
+            if (w < 8) w = 8;
+            if (h < 8) h = 8;
+            var bmp = new Bitmap(w, h);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                TextRenderer.DrawText(g, emoji, font, new Point(2, 2),
+                    Color.White, Color.Transparent);
+            }
+            return bmp;
+        }
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float scale = anim.Scale;
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 5937));
+            float angle = (float)(rng.NextDouble() * PI * 2);
+            data = new Data
+            {
+                Angle = angle,
+                RotationDeg = angle * 180f / PI + 90f,
+                EmojiBmp = RenderEmoji(EmojiSize),
+            };
+            anim.EffectData = data;
+        }
+
+        float t = anim.Age / (float)Duration;
+        float moveT = Math.Min(1f, t / 0.6f);
+        float moveEased = Easing.EaseOutBack(moveT);
+        // 从 50% 开始淡出，30% 时间内完成
+        float fadeT = Math.Max(0f, (t - 0.5f) / 0.3f);
+        float alpha = 1f - Easing.EaseInQuad(fadeT);
+        if (alpha <= 0f) return;
+
+        float drawW = data.EmojiBmp.Width * scale * DisplayScale;
+        float drawH = data.EmojiBmp.Height * scale * DisplayScale;
+        float tipOff = drawH * 0.45f;
+        float rotRad = data.RotationDeg * PI / 180f;
+
+        float tipDirX = (float)Math.Sin(rotRad);
+        float tipDirY = -(float)Math.Cos(rotRad);
+
+        float endPx = cx - tipDirX * tipOff;
+        float endPy = cy - tipDirY * tipOff;
+        float startPx = endPx - tipDirX * StartDist * scale;
+        float startPy = endPy - tipDirY * StartDist * scale;
+
+        float px = startPx + (endPx - startPx) * moveEased;
+        float py = startPy + (endPy - startPy) * moveEased;
+
+        int a = (int)(255 * alpha);
+        if (a <= 0 || data.EmojiBmp == null) return;
+
+        _matrixItems[0][0] = baseColor.R / 255f;
+        _matrixItems[1][1] = baseColor.G / 255f;
+        _matrixItems[2][2] = baseColor.B / 255f;
+        _matrixItems[3][3] = a / 255f;
+
+        if (_imgAttrs == null) _imgAttrs = new System.Drawing.Imaging.ImageAttributes();
+        _imgAttrs.SetColorMatrix(new System.Drawing.Imaging.ColorMatrix(_matrixItems),
+            System.Drawing.Imaging.ColorMatrixFlag.Default,
+            System.Drawing.Imaging.ColorAdjustType.Bitmap);
+
+        GraphicsState state = g.Save();
+        g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+        g.TranslateTransform(px, py);
+        g.RotateTransform(data.RotationDeg);
+
+        var destRect = new Rectangle(
+            (int)(-drawW / 2f), (int)(-drawH / 2f),
+            (int)drawW, (int)drawH);
+        g.DrawImage(data.EmojiBmp, destRect,
+            0, 0, data.EmojiBmp.Width, data.EmojiBmp.Height,
+            GraphicsUnit.Pixel, _imgAttrs);
+
+        g.Restore(state);
+    }
+}
+
+// ==================== 效果：闪电 ====================
+
+class LightningEffect : IClickEffect
+{
+    public string Name { get { return "闪电"; } }
+    public int Duration { get { return 350; } }
+
+    const int SubdivideLevels = 3;
+    const float StartDist = 60f;
+    const float OffsetBase = 18f;
+
+    class Data
+    {
+        public float[] MainX, MainY;
+        public int BranchCount;
+        public int[] BranchStart;
+        public float[][] BranchX, BranchY;
+    }
+
+    Pen _glowPen = new Pen(Color.Black, 3f);
+    Pen _corePen = new Pen(Color.Black, 1.5f);
+    Pen _branchPen = new Pen(Color.Black, 1f);
+
+    public void Cleanup()
+    {
+        _glowPen.Dispose();
+        _corePen.Dispose();
+        _branchPen.Dispose();
+    }
+
+    static void Subdivide(Random rng, float x1, float y1, float x2, float y2,
+                          float offsetX, float offsetY, int levels,
+                          List<float> xs, List<float> ys)
+    {
+        if (levels <= 0)
+        {
+            xs.Add(x2);
+            ys.Add(y2);
+            return;
+        }
+        float mx = (x1 + x2) * 0.5f;
+        float my = (y1 + y2) * 0.5f;
+        float disp = (float)(rng.NextDouble() - 0.5) * 2f;
+        mx += offsetX * disp;
+        my += offsetY * disp;
+        Subdivide(rng, x1, y1, mx, my, offsetX * 0.5f, offsetY * 0.5f, levels - 1, xs, ys);
+        Subdivide(rng, mx, my, x2, y2, offsetX * 0.5f, offsetY * 0.5f, levels - 1, xs, ys);
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 29979));
+            data = new Data();
+
+            float angle = (float)(rng.NextDouble() * Math.PI * 2);
+            float cosA = (float)Math.Cos(angle);
+            float sinA = (float)Math.Sin(angle);
+            float cosP = (float)Math.Cos(angle + Math.PI / 2f);
+            float sinP = (float)Math.Sin(angle + Math.PI / 2f);
+
+            // 主干：分形细分生成锯齿路径
+            int mainCount = 1 << SubdivideLevels; // 8 段
+            var mainXs = new List<float>(mainCount + 1);
+            var mainYs = new List<float>(mainCount + 1);
+            mainXs.Add(cosA * StartDist);
+            mainYs.Add(sinA * StartDist);
+            Subdivide(rng,
+                cosA * StartDist, sinA * StartDist, 0f, 0f,
+                cosP * OffsetBase, sinP * OffsetBase,
+                SubdivideLevels, mainXs, mainYs);
+            data.MainX = mainXs.ToArray();
+            data.MainY = mainYs.ToArray();
+
+            // 分支：2-4 条，每条也用分形细分
+            int mainSegCount = data.MainX.Length - 1;
+            data.BranchCount = 2 + rng.Next(3);
+            data.BranchStart = new int[data.BranchCount];
+            data.BranchX = new float[data.BranchCount][];
+            data.BranchY = new float[data.BranchCount][];
+
+            for (int b = 0; b < data.BranchCount; b++)
+            {
+                int startIdx = 2 + rng.Next(mainSegCount - 2);
+                data.BranchStart[b] = startIdx;
+
+                // 分支方向：从主干方向偏转 30-80 度
+                float branchAngle = angle + (float)((rng.NextDouble() - 0.5) * Math.PI * 0.8f);
+                float bCos = (float)Math.Cos(branchAngle);
+                float bSin = (float)Math.Sin(branchAngle);
+                float bCosP = (float)Math.Cos(branchAngle + Math.PI / 2f);
+                float bSinP = (float)Math.Sin(branchAngle + Math.PI / 2f);
+
+                float branchLen = StartDist * (0.25f + (float)(rng.NextDouble() * 0.25f));
+                int branchLevels = 2 + rng.Next(2); // 4 或 8 段
+
+                var bxList = new List<float>();
+                var byList = new List<float>();
+                bxList.Add(data.MainX[startIdx]);
+                byList.Add(data.MainY[startIdx]);
+                Subdivide(rng,
+                    data.MainX[startIdx], data.MainY[startIdx],
+                    data.MainX[startIdx] + bCos * branchLen,
+                    data.MainY[startIdx] + bSin * branchLen,
+                    bCosP * OffsetBase * 0.5f, bSinP * OffsetBase * 0.5f,
+                    branchLevels, bxList, byList);
+                data.BranchX[b] = bxList.ToArray();
+                data.BranchY[b] = byList.ToArray();
+            }
+
+            anim.EffectData = data;
+        }
+
+        float t = anim.Age / (float)Duration;
+        float alpha = 1f - Easing.EaseInQuad(t);
+        if (alpha <= 0f) return;
+
+        // 从远端到近端的渲染进度（前 35% 时间完成展开）
+        float reveal = Math.Min(1f, t / 0.35f);
+        float revealEased = Easing.EaseOutQuad(reveal);
+
+        int segCount = data.MainX.Length - 1;
+
+        // 击中后闪烁：35%~55% 区间做两次明暗脉冲
+        float flicker = 1f;
+        if (t >= 0.35f && t < 0.55f)
+        {
+            float ft = (t - 0.35f) / 0.2f;
+            float wave = (float)Math.Sin(ft * Math.PI * 2f);
+            flicker = 1f + 0.6f * wave;
+        }
+
+        int a = (int)(255 * alpha * flicker);
+        int glowA = (int)(80 * alpha * flicker);
+        if (a > 255) a = 255;
+        if (glowA > 255) glowA = 255;
+
+        // 计算当前闪电尖端位置（用于末端闪光）
+        float tipX = 0, tipY = 0;
+        {
+            int tipSeg = (int)(revealEased * segCount);
+            if (tipSeg >= segCount) tipSeg = segCount - 1;
+            float segFrac = revealEased * segCount - tipSeg;
+            float tx1 = cx + data.MainX[tipSeg] * scale;
+            float ty1 = cy + data.MainY[tipSeg] * scale;
+            float tx2 = cx + data.MainX[tipSeg + 1] * scale;
+            float ty2 = cy + data.MainY[tipSeg + 1] * scale;
+            tipX = tx1 + (tx2 - tx1) * segFrac;
+            tipY = ty1 + (ty2 - ty1) * segFrac;
+        }
+
+        // 主干辉光 + 核心（逐段显现，远端粗近端细）
+        for (int i = 0; i < segCount; i++)
+        {
+            float segFar = (float)i / segCount;
+            float segNear = (float)(i + 1) / segCount;
+            if (segFar >= revealEased) break;
+
+            float x1 = cx + data.MainX[i] * scale;
+            float y1 = cy + data.MainY[i] * scale;
+            float x2 = cx + data.MainX[i + 1] * scale;
+            float y2 = cy + data.MainY[i + 1] * scale;
+
+            if (segNear > revealEased)
+            {
+                float segProgress = (revealEased - segFar) / (segNear - segFar);
+                x2 = x1 + (x2 - x1) * segProgress;
+                y2 = y1 + (y2 - y1) * segProgress;
+            }
+
+            float widthT = 1f - (float)i / segCount;
+            float glowW = (1.5f + 2.5f * widthT) * scale;
+            float coreW = (0.6f + 1.2f * widthT) * scale;
+
+            _glowPen.Color = Color.FromArgb(glowA, baseColor);
+            _glowPen.Width = glowW;
+            _corePen.Color = Color.FromArgb(a, baseColor);
+            _corePen.Width = coreW;
+
+            g.DrawLine(_glowPen, x1, y1, x2, y2);
+            g.DrawLine(_corePen, x1, y1, x2, y2);
+        }
+
+        // 分支（逐段展开）
+        for (int b = 0; b < data.BranchCount; b++)
+        {
+            float branchRevealPos = (float)data.BranchStart[b] / segCount;
+            if (branchRevealPos >= revealEased) continue;
+
+            int branchLen = data.BranchX[b].Length - 1;
+            float branchAlpha = Math.Min(1f, (revealEased - branchRevealPos) / 0.2f);
+            float parentWidthT = 1f - branchRevealPos;
+
+            // 分支在主干到达后的展开进度
+            float branchReveal = Math.Min(1f, (revealEased - branchRevealPos) / (1f - branchRevealPos));
+            float branchRevealEased = Easing.EaseOutQuad(branchReveal);
+
+            for (int i = 0; i < branchLen; i++)
+            {
+                float bSegFar = (float)i / branchLen;
+                float bSegNear = (float)(i + 1) / branchLen;
+                if (bSegFar >= branchRevealEased) break;
+
+                float x1 = cx + data.BranchX[b][i] * scale;
+                float y1 = cy + data.BranchY[b][i] * scale;
+                float x2 = cx + data.BranchX[b][i + 1] * scale;
+                float y2 = cy + data.BranchY[b][i + 1] * scale;
+
+                if (bSegNear > branchRevealEased)
+                {
+                    float bp = (branchRevealEased - bSegFar) / (bSegNear - bSegFar);
+                    x2 = x1 + (x2 - x1) * bp;
+                    y2 = y1 + (y2 - y1) * bp;
+                }
+
+                // 分支也从粗到细
+                float bWidthT = 1f - (float)i / branchLen;
+                _branchPen.Width = (0.4f + 0.6f * bWidthT) * parentWidthT * scale;
+                _branchPen.Color = Color.FromArgb((int)(a * 0.7f * branchAlpha), baseColor);
+
+                g.DrawLine(_branchPen, x1, y1, x2, y2);
+            }
+        }
+
+        // 末端闪光（展开过程中，尖端带亮光）
+        if (reveal < 1f)
+        {
+            float tipFade = 1f - reveal;
+            float tipSize = (4f + 3f * tipFade) * scale;
+            int tipA = (int)(200 * tipFade * alpha);
+            _glowPen.Color = Color.FromArgb(tipA, baseColor);
+            _glowPen.Width = tipSize;
+            // 画一个小十字闪光
+            float cs = 3f * scale * tipFade;
+            g.DrawLine(_glowPen, tipX - cs, tipY, tipX + cs, tipY);
+            g.DrawLine(_glowPen, tipX, tipY - cs, tipX, tipY + cs);
         }
     }
 }
