@@ -28,6 +28,7 @@ class AnimationState
     public string EffectName;
     public IClickEffect CachedEffect;
     public object EffectData; // 各效果缓存的预计算数据，每动画只算一次
+    public float Scale = 1f; // 效果大小缩放系数
     Color _cachedColor;
     bool _colorCached;
 
@@ -110,15 +111,18 @@ class LineBurstEffect : IClickEffect
     {
         int cx = anim.Position.X - screenBounds.X;
         int cy = anim.Position.Y - screenBounds.Y;
+        float scale = anim.Scale;
 
         float progress = Math.Min(1f, anim.Age / 500f);
         if (progress >= 1f) return;
 
         Color baseColor = anim.GetColor(color);
         float glowIntensity = color.GlowIntensity;
+        float erase = EraseDistance * scale;
 
         for (int i = 0; i < 3; i++)
         {
+            float lineLen = LineLengths[i] * scale;
             float lineProgress = Math.Max(0f, Math.Min(1f,
                 (progress - LineDelays[i]) / (1f - LineDelays[i])));
             if (lineProgress <= 0f) continue;
@@ -134,8 +138,8 @@ class LineBurstEffect : IClickEffect
                 float expandPhase = lineProgress / 0.4f;
                 float expand = Easing.EaseOutBack(expandPhase);
 
-                startDist = EraseDistance;
-                endDist = EraseDistance + LineLengths[i] * expand;
+                startDist = erase;
+                endDist = erase + lineLen * expand;
                 alpha = 1f;
             }
             else
@@ -144,8 +148,8 @@ class LineBurstEffect : IClickEffect
                 if (disappearPhase > 1f) disappearPhase = 1f;
                 float shrink = 1f - Easing.EaseInQuad(disappearPhase);
 
-                startDist = EraseDistance + LineLengths[i] * (1f - shrink);
-                endDist = EraseDistance + LineLengths[i] * (1f + 0.4f * disappearPhase);
+                startDist = erase + lineLen * (1f - shrink);
+                endDist = erase + lineLen * (1f + 0.4f * disappearPhase);
                 alpha = shrink;
             }
 
@@ -218,7 +222,7 @@ class RippleEffect : IClickEffect
 
             float expand = Easing.EaseOutQuad(ringT);
             float fade = 1f - Easing.EaseInQuad(ringT);
-            float radius = data.MaxRadius * expand * fade;
+            float radius = data.MaxRadius * anim.Scale * expand * fade;
             if (radius < 0.5f || fade <= 0f) continue;
 
             int a = (int)(255 * fade);
@@ -242,7 +246,8 @@ class SparkEffect : IClickEffect
 
     class Data
     {
-        public float[] Angles;
+        public float[] CosAngles;
+        public float[] SinAngles;
         public float[] BaseSizes;
         public float[] Bris;
     }
@@ -268,13 +273,16 @@ class SparkEffect : IClickEffect
             var rng = new Random(unchecked(anim.RandomSeed ^ 73856093));
             data = new Data
             {
-                Angles = new float[DotCount],
+                CosAngles = new float[DotCount],
+                SinAngles = new float[DotCount],
                 BaseSizes = new float[DotCount],
                 Bris = new float[DotCount],
             };
             for (int i = 0; i < DotCount; i++)
             {
-                data.Angles[i] = (float)(rng.NextDouble() * Math.PI * 2);
+                float angle = (float)(rng.NextDouble() * Math.PI * 2);
+                data.CosAngles[i] = (float)Math.Cos(angle);
+                data.SinAngles[i] = (float)Math.Sin(angle);
                 data.BaseSizes[i] = 2f + (float)(rng.NextDouble() * 1.5f);
                 data.Bris[i] = 0.85f + (float)(rng.NextDouble() * 0.15f);
             }
@@ -284,16 +292,15 @@ class SparkEffect : IClickEffect
         float shrink = 1f - Easing.EaseInQuad(t);
         if (shrink <= 0f) return;
 
-        float dist = MaxDist * Easing.EaseOutQuad(t);
+        float dist = MaxDist * anim.Scale * Easing.EaseOutQuad(t);
 
         for (int i = 0; i < DotCount; i++)
         {
-            float angle = data.Angles[i];
-            float size = data.BaseSizes[i] * shrink;
+            float size = data.BaseSizes[i] * anim.Scale * shrink;
             float bri = data.Bris[i];
 
-            float px = cx + (float)Math.Cos(angle) * dist;
-            float py = cy + (float)Math.Sin(angle) * dist;
+            float px = cx + data.CosAngles[i] * dist;
+            float py = cy + data.SinAngles[i] * dist;
 
             int a = (int)(255 * shrink * bri);
             _brush.Color = Color.FromArgb(a,
@@ -320,9 +327,9 @@ class StarEffect : IClickEffect
 
     class StarData
     {
-        public float Angle, Delay, Life, Dist, Size, Bri;
+        public float Delay, Life, Dist, Size, Bri;
         public float Curve, TwinkleSpeed, InitRot, RotSpeed;
-        public float PerpAngle;
+        public float CosAngle, SinAngle, CosPerp, SinPerp;
     }
 
     Pen _pen = new Pen(Color.Black, 1.2f);
@@ -350,9 +357,13 @@ class StarEffect : IClickEffect
             for (int i = 0; i < StarCount; i++)
             {
                 float angle = (float)(rng.NextDouble() * Math.PI * 2);
+                float perp = angle + (float)Math.PI / 2f;
                 stars[i] = new StarData
                 {
-                    Angle = angle,
+                    CosAngle = (float)Math.Cos(angle),
+                    SinAngle = (float)Math.Sin(angle),
+                    CosPerp = (float)Math.Cos(perp),
+                    SinPerp = (float)Math.Sin(perp),
                     Delay = 0.05f + (float)(rng.NextDouble() * 0.25f),
                     Life = 0.5f + (float)(rng.NextDouble() * 0.45f),
                     Dist = MaxDist * (0.6f + (float)(rng.NextDouble() * 0.4f)),
@@ -362,7 +373,6 @@ class StarEffect : IClickEffect
                     TwinkleSpeed = 0.8f + (float)(rng.NextDouble() * 0.7f),
                     InitRot = (float)(rng.NextDouble() * Math.PI * 2),
                     RotSpeed = ((rng.Next(2) == 0) ? 1f : -1f) * (80f + (float)(rng.NextDouble() * 120f)),
-                    PerpAngle = angle + (float)Math.PI / 2f,
                 };
             }
             anim.EffectData = stars;
@@ -375,14 +385,15 @@ class StarEffect : IClickEffect
             float localT = (t - s.Delay) / s.Life;
             if (localT <= 0f || localT >= 1f) continue;
 
+            float dist = s.Dist * anim.Scale;
             float moveT = Easing.EaseOutQuad(Math.Min(1f, localT * 2.5f));
-            float drift = Easing.EaseInQuad(Math.Max(0f, localT - 0.4f) / 0.6f) * s.Dist * 0.4f;
-            float r = s.Dist * moveT + drift;
+            float drift = Easing.EaseInQuad(Math.Max(0f, localT - 0.4f) / 0.6f) * dist * 0.4f;
+            float r = dist * moveT + drift;
 
             float curveAmount = s.Curve * Easing.EaseInQuad(localT);
 
-            float px = cx + (float)Math.Cos(s.Angle) * r + (float)Math.Cos(s.PerpAngle) * curveAmount;
-            float py = cy + (float)Math.Sin(s.Angle) * r + (float)Math.Sin(s.PerpAngle) * curveAmount;
+            float px = cx + s.CosAngle * r + s.CosPerp * curveAmount;
+            float py = cy + s.SinAngle * r + s.SinPerp * curveAmount;
 
             float fadeIn = Math.Min(1f, localT * 6f);
             float fadeOut = 1f - Easing.EaseInQuad(Math.Max(0f, localT - 0.5f) / 0.5f);
@@ -392,7 +403,7 @@ class StarEffect : IClickEffect
 
             float sizeScale = Easing.EaseOutBack(Math.Min(1f, localT * 4f))
                             * (1f - Easing.EaseInQuad(Math.Max(0f, localT - 0.6f) / 0.4f) * 0.6f);
-            float sz = s.Size * sizeScale;
+            float sz = s.Size * anim.Scale * sizeScale;
             if (sz < 0.3f) continue;
 
             float rot = s.InitRot + s.RotSpeed * localT * (float)Math.PI / 180f;
@@ -481,9 +492,10 @@ class PetalEffect : IClickEffect
             anim.EffectData = data;
         }
 
+        float effectScale = anim.Scale;
         float expand = Easing.EaseOutBack(Math.Min(1f, t * 3f));
         float shrink = 1f - Easing.EaseInQuad(t);
-        float dist = MaxDist * expand * shrink;
+        float dist = MaxDist * effectScale * expand * shrink;
         float scale = shrink;
         float alpha = shrink;
         float rotExtra = data.RotDir * 25f * t;
@@ -492,8 +504,8 @@ class PetalEffect : IClickEffect
         int a = (int)(255 * alpha);
         float baseRotRad = (data.InitRot + rotExtra) * (float)Math.PI / 180f;
         float angleStep = (float)(Math.PI * 2) / data.PetalCount;
-        float hl = PetalLength * scale * data.SizeVar;
-        float hw = PetalWidth * scale * data.SizeVar;
+        float hl = PetalLength * effectScale * scale * data.SizeVar;
+        float hw = PetalWidth * effectScale * scale * data.SizeVar;
 
         for (int i = 0; i < data.PetalCount; i++)
         {

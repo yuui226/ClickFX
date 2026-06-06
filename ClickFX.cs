@@ -204,6 +204,7 @@ class OverlayManager : IDisposable
     ToolStripMenuItem _toggleItem;
     HotkeyForm _hotkeyForm;
     bool _enabled = true;
+    bool _settingsOpen;
 
     public AppConfig Config { get; private set; }
 
@@ -219,19 +220,19 @@ class OverlayManager : IDisposable
     public void Start()
     {
         _trayIcon = new NotifyIcon();
-        _trayIcon.Icon = CreateTrayIcon();
+        _trayIcon.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         _trayIcon.Text = "ClickFX";
         _trayIcon.Visible = true;
 
         var menu = new ContextMenuStrip();
 
-        _toggleItem = new ToolStripMenuItem("暂停");
-        _toggleItem.Click += (s, e) => ToggleEnabled();
-        menu.Items.Add(_toggleItem);
-
         var settingsItem = new ToolStripMenuItem("设置");
         settingsItem.Click += (s, e) => OpenSettings();
         menu.Items.Add(settingsItem);
+
+        _toggleItem = new ToolStripMenuItem("暂停");
+        _toggleItem.Click += (s, e) => ToggleEnabled();
+        menu.Items.Add(_toggleItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
@@ -288,14 +289,29 @@ class OverlayManager : IDisposable
 
     void OpenSettings()
     {
-        using (var form = new ConfigForm(Config))
+        if (_settingsOpen) return;
+        _settingsOpen = true;
+        var original = Config;
+        try
         {
-            if (form.ShowDialog() == DialogResult.OK)
+            using (var form = new ConfigForm(Config))
             {
-                Config = form.Result;
-                ConfigManager.Save(Config);
-                ApplyHotkey();
+                form.OnPreview = preview => { Config = preview; };
+                if (form.ShowDialog() == DialogResult.OK)
+                {
+                    Config = form.Result;
+                    ConfigManager.Save(Config);
+                    ApplyHotkey();
+                }
+                else
+                {
+                    Config = original; // 取消时还原
+                }
             }
+        }
+        finally
+        {
+            _settingsOpen = false;
         }
     }
 
@@ -367,7 +383,8 @@ class OverlayManager : IDisposable
             _animations.Add(new AnimationState
             {
                 Position = pos, Age = 0, Button = button, Duration = duration,
-                RandomSeed = seed, EffectName = effect.Name, CachedEffect = effect
+                RandomSeed = seed, EffectName = effect.Name, CachedEffect = effect,
+                Scale = Config.EffectScale
             });
         }
     }
@@ -423,32 +440,6 @@ class OverlayManager : IDisposable
             _trayIcon.Dispose();
             _trayIcon = null;
         }
-    }
-
-    static Icon CreateTrayIcon()
-    {
-        IntPtr hIcon;
-        using (var bmp = new Bitmap(16, 16))
-        {
-            using (var g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Transparent);
-                using (var pen = new Pen(Color.FromArgb(80, 140, 255), 2f))
-                {
-                    g.DrawEllipse(pen, 3, 3, 10, 10);
-                    g.DrawLine(pen, 8, 1, 8, 5);
-                    g.DrawLine(pen, 8, 11, 8, 15);
-                    g.DrawLine(pen, 1, 8, 5, 8);
-                    g.DrawLine(pen, 11, 8, 15, 8);
-                }
-            }
-            hIcon = bmp.GetHicon();
-        }
-        var icon = Icon.FromHandle(hIcon);
-        var cloned = (Icon)icon.Clone(); // 拷贝一份，脱离原始句柄
-        NativeMethods.DestroyIcon(hIcon);
-        return cloned;
     }
 }
 
@@ -545,15 +536,16 @@ class OverlayForm : Form
         if (_cachedHBitmap == IntPtr.Zero) return;
 
         // 脏矩形 = 上一帧动效区域 ∪ 当前帧动效区域（不含历史，避免无限增长）
-        const int MARGIN = 40;
+        const int BASE_MARGIN = 40;
         Rectangle dirty = _prevAnimArea;
         Rectangle curAnimArea = Rectangle.Empty;
 
         for (int i = 0; i < anims.Count; i++)
         {
-            int ax = anims[i].Position.X - Left - MARGIN;
-            int ay = anims[i].Position.Y - Top - MARGIN;
-            var area = new Rectangle(ax, ay, MARGIN * 2, MARGIN * 2);
+            int margin = (int)(BASE_MARGIN * anims[i].Scale);
+            int ax = anims[i].Position.X - Left - margin;
+            int ay = anims[i].Position.Y - Top - margin;
+            var area = new Rectangle(ax, ay, margin * 2, margin * 2);
             dirty = Rectangle.Union(dirty, area);
             curAnimArea = Rectangle.Union(curAnimArea, area);
         }

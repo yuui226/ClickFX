@@ -22,6 +22,7 @@ class AppConfig
     public bool AutoStart { get; set; }
     public int HotkeyModifiers { get; set; }
     public int HotkeyKey { get; set; }
+    public float EffectScale { get; set; }
 
     public AppConfig()
     {
@@ -35,6 +36,7 @@ class AppConfig
         AutoStart = false;
         HotkeyModifiers = 0;
         HotkeyKey = 0;
+        EffectScale = 1.0f;
     }
 }
 
@@ -143,7 +145,9 @@ static class ConfigManager
             + "  \"InfoUrl\": " + Quote(c.InfoUrl ?? "") + ",\n"
             + "  \"AutoStart\": " + (c.AutoStart ? "true" : "false") + ",\n"
             + "  \"HotkeyModifiers\": " + c.HotkeyModifiers + ",\n"
-            + "  \"HotkeyKey\": " + c.HotkeyKey + "\n"
+            + "  \"HotkeyKey\": " + c.HotkeyKey + ",\n"
+            + "  \"EffectScale\": " + c.EffectScale.ToString("0.0",
+                System.Globalization.CultureInfo.InvariantCulture) + "\n"
             + "}";
     }
 
@@ -193,6 +197,11 @@ static class ConfigManager
             c.HotkeyModifiers = n;
         if (d.ContainsKey("HotkeyKey") && int.TryParse(d["HotkeyKey"], out n))
             c.HotkeyKey = n;
+        float f;
+        if (d.ContainsKey("EffectScale") && float.TryParse(d["EffectScale"],
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out f))
+            c.EffectScale = f;
 
         return c;
     }
@@ -307,6 +316,7 @@ static class ConfigManager
 class ConfigForm : Form
 {
     public AppConfig Result { get; private set; }
+    public Action<AppConfig> OnPreview; // 实时预览回调
 
     ComboBox _leftEffectCombo, _rightEffectCombo;
     Panel _leftPreview, _rightPreview;
@@ -315,11 +325,14 @@ class ConfigForm : Form
     LinkLabel _projectLink;
 
     CheckBox _autoStartCheckBox;
+    Label _scaleValueLabel;
+    float _currentScale = 1.0f;
     TextBox _hotkeyTextBox;
     Button _hotkeyClearBtn;
 
     AppConfig _originalConfig;
     int _hotkeyModifiers, _hotkeyKey;
+    bool _loading = true; // LoadValues 期间抑制预览回调
 
     public ConfigForm(AppConfig config)
     {
@@ -327,6 +340,32 @@ class ConfigForm : Form
         Result = config;
         InitUI();
         LoadValues(config);
+        _loading = false;
+    }
+
+    // 从当前 UI 状态构建 AppConfig（不触发副作用）
+    AppConfig BuildCurrentConfig()
+    {
+        var c = new AppConfig();
+        c.LeftEffect = (_leftEffectCombo.SelectedItem as string) ?? "线条爆发";
+        c.RightEffect = (_rightEffectCombo.SelectedItem as string) ?? "线条爆发";
+        c.LeftClick = new ColorConfig(NormalizeHexValue(_leftHex.Text));
+        c.LeftClick.GlowIntensity = _originalConfig.LeftClick.GlowIntensity;
+        c.RightClick = new ColorConfig(NormalizeHexValue(_rightHex.Text));
+        c.RightClick.GlowIntensity = _originalConfig.RightClick.GlowIntensity;
+        c.InfoText = _originalConfig.InfoText;
+        c.InfoUrl = _originalConfig.InfoUrl;
+        c.AutoStart = _autoStartCheckBox.Checked;
+        c.HotkeyModifiers = _hotkeyModifiers;
+        c.HotkeyKey = _hotkeyKey;
+        c.EffectScale = _currentScale;
+        return c;
+    }
+
+    void NotifyPreview()
+    {
+        if (_loading) return;
+        if (OnPreview != null) OnPreview(BuildCurrentConfig());
     }
 
     void InitUI()
@@ -336,78 +375,85 @@ class ConfigForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(380, 380);
+        ClientSize = new Size(340, 300);
 
         int y = 15;
 
-        // 左键动效
-        Controls.Add(new Label { Text = "左键动效：", Location = new Point(15, y + 3), AutoSize = true });
+        // 左键：标签 + 动效下拉 + 颜色选择
+        Controls.Add(new Label { Text = "左键", Location = new Point(12, y + 4), AutoSize = true });
         _leftEffectCombo = new ComboBox
         {
-            Location = new Point(90, y),
-            Size = new Size(180, 25),
+            Location = new Point(48, y),
+            Size = new Size(115, 25),
             DropDownStyle = ComboBoxStyle.DropDownList
         };
         _leftEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
+        _leftEffectCombo.SelectedIndexChanged += (s, e) => NotifyPreview();
         Controls.Add(_leftEffectCombo);
-        y += 35;
+        _leftPreview = new Panel { Location = new Point(168, y + 2), Size = new Size(22, 20), BorderStyle = BorderStyle.FixedSingle };
+        Controls.Add(_leftPreview);
+        _leftHex = new TextBox { Location = new Point(194, y + 2), Size = new Size(75, 22) };
+        Controls.Add(_leftHex);
+        _leftPick = new Button { Text = "选色", Location = new Point(270, y - 2), Size = new Size(40, 24) };
+        _leftPick.Click += (s, e) => PickColor(_leftHex, _leftPreview);
+        Controls.Add(_leftPick);
+        y += 32;
 
-        // 右键动效
-        Controls.Add(new Label { Text = "右键动效：", Location = new Point(15, y + 3), AutoSize = true });
+        // 右键：标签 + 动效下拉 + 颜色选择
+        Controls.Add(new Label { Text = "右键", Location = new Point(12, y + 4), AutoSize = true });
         _rightEffectCombo = new ComboBox
         {
-            Location = new Point(90, y),
-            Size = new Size(180, 25),
+            Location = new Point(48, y),
+            Size = new Size(115, 25),
             DropDownStyle = ComboBoxStyle.DropDownList
         };
         _rightEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
+        _rightEffectCombo.SelectedIndexChanged += (s, e) => NotifyPreview();
         Controls.Add(_rightEffectCombo);
-        y += 40;
-
-        // 左键颜色
-        Controls.Add(new Label { Text = "左键颜色：", Location = new Point(15, y + 3), AutoSize = true });
-        _leftPreview = new Panel { Location = new Point(90, y), Size = new Size(28, 22), BorderStyle = BorderStyle.FixedSingle };
-        Controls.Add(_leftPreview);
-        _leftHex = new TextBox { Location = new Point(125, y), Size = new Size(100, 22) };
-        Controls.Add(_leftHex);
-        _leftPick = new Button { Text = "选择", Location = new Point(232, y - 1), Size = new Size(60, 24) };
-        _leftPick.Click += (s, e) => PickColor(_leftHex, _leftPreview);
-        Controls.Add(_leftPick);
-        y += 38;
-
-        // 右键颜色
-        Controls.Add(new Label { Text = "右键颜色：", Location = new Point(15, y + 3), AutoSize = true });
-        _rightPreview = new Panel { Location = new Point(90, y), Size = new Size(28, 22), BorderStyle = BorderStyle.FixedSingle };
+        _rightPreview = new Panel { Location = new Point(168, y + 2), Size = new Size(22, 20), BorderStyle = BorderStyle.FixedSingle };
         Controls.Add(_rightPreview);
-        _rightHex = new TextBox { Location = new Point(125, y), Size = new Size(100, 22) };
+        _rightHex = new TextBox { Location = new Point(194, y + 2), Size = new Size(75, 22) };
         Controls.Add(_rightHex);
-        _rightPick = new Button { Text = "选择", Location = new Point(232, y - 1), Size = new Size(60, 24) };
+        _rightPick = new Button { Text = "选色", Location = new Point(270, y - 2), Size = new Size(40, 24) };
         _rightPick.Click += (s, e) => PickColor(_rightHex, _rightPreview);
         Controls.Add(_rightPick);
-        y += 38;
+        y += 35;
 
         // HEX 输入变化时更新预览
-        _leftHex.TextChanged += (s, e) => UpdatePreview(_leftHex, _leftPreview);
-        _rightHex.TextChanged += (s, e) => UpdatePreview(_rightHex, _rightPreview);
+        _leftHex.TextChanged += (s, e) => { UpdatePreview(_leftHex, _leftPreview); NotifyPreview(); };
+        _rightHex.TextChanged += (s, e) => { UpdatePreview(_rightHex, _rightPreview); NotifyPreview(); };
         _leftHex.Leave += (s, e) => NormalizeHex(_leftHex);
         _rightHex.Leave += (s, e) => NormalizeHex(_rightHex);
 
-        // 开机启动
-        _autoStartCheckBox = new CheckBox
+        // 效果大小（+/− 按钮）
+        Controls.Add(new Label { Text = "效果大小：", Location = new Point(12, y + 3), AutoSize = true });
+        _scaleValueLabel = new Label
         {
-            Text = "开机自启动",
-            Location = new Point(15, y),
-            AutoSize = true
+            Text = "1.0x",
+            Location = new Point(78, y + 3),
+            AutoSize = true,
         };
-        Controls.Add(_autoStartCheckBox);
-        y += 30;
+        Controls.Add(_scaleValueLabel);
+        var scaleMinusBtn = new Button { Text = "↓", Location = new Point(118, y), Size = new Size(28, 24) };
+        scaleMinusBtn.Click += (s, e) => { _currentScale = Math.Max(0.3f, (float)Math.Round(_currentScale - 0.1f, 1)); _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x"; NotifyPreview(); };
+        Controls.Add(scaleMinusBtn);
+        var scalePlusBtn = new Button { Text = "↑", Location = new Point(150, y), Size = new Size(28, 24) };
+        scalePlusBtn.Click += (s, e) => { _currentScale = Math.Min(3.0f, (float)Math.Round(_currentScale + 0.1f, 1)); _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x"; NotifyPreview(); };
+        Controls.Add(scalePlusBtn);
+        y += 32;
 
-        // 快捷键
-        Controls.Add(new Label { Text = "快捷键：", Location = new Point(15, y + 3), AutoSize = true });
+        // 恢复默认（仅动效相关）
+        var resetBtn = new Button { Text = "恢复默认", Location = new Point(12, y), Size = new Size(70, 24) };
+        resetBtn.Click += (s, e) => ResetEffects();
+        Controls.Add(resetBtn);
+        y += 34;
+
+        // 开关快捷键
+        Controls.Add(new Label { Text = "开关快捷键", Location = new Point(12, y + 3), AutoSize = true });
         _hotkeyTextBox = new TextBox
         {
-            Location = new Point(80, y),
-            Size = new Size(190, 22),
+            Location = new Point(90, y),
+            Size = new Size(160, 22),
             ReadOnly = true,
             BackColor = SystemColors.Window
         };
@@ -415,49 +461,68 @@ class ConfigForm : Form
         _hotkeyTextBox.GotFocus += (s, e) => _hotkeyTextBox.BackColor = SystemColors.Info;
         _hotkeyTextBox.LostFocus += (s, e) => _hotkeyTextBox.BackColor = SystemColors.Window;
         Controls.Add(_hotkeyTextBox);
-        _hotkeyClearBtn = new Button { Text = "清除", Location = new Point(278, y - 1), Size = new Size(60, 24) };
+        _hotkeyClearBtn = new Button { Text = "清除", Location = new Point(254, y - 1), Size = new Size(46, 24) };
         _hotkeyClearBtn.Click += (s, e) => { _hotkeyModifiers = 0; _hotkeyKey = 0; _hotkeyTextBox.Text = ""; };
         Controls.Add(_hotkeyClearBtn);
-        y += 35;
+        y += 30;
 
-        // 恢复默认
-        var resetBtn = new Button { Text = "恢复默认", Location = new Point(15, y), Size = new Size(80, 28) };
-        resetBtn.Click += (s, e) => LoadValues(new AppConfig());
-        Controls.Add(resetBtn);
-        y += 40;
+        // 开机自启动
+        _autoStartCheckBox = new CheckBox
+        {
+            Text = "开机自启动",
+            Location = new Point(12, y),
+            AutoSize = true
+        };
+        Controls.Add(_autoStartCheckBox);
+        y += 28;
 
-        // GitHub 链接和引导文本
+        // GitHub 链接
         _projectLink = new LinkLabel
         {
             Text = "GitHub: https://github.com/yuui226/ClickFX",
-            Location = new Point(15, y),
-            Size = new Size(340, 18),
+            Location = new Point(12, y),
+            Size = new Size(310, 18),
             AutoSize = false
         };
         _projectLink.LinkClicked += (s, e) =>
             System.Diagnostics.Process.Start("https://github.com/yuui226/ClickFX");
         Controls.Add(_projectLink);
-        y += 22;
+        y += 20;
 
         var donateLabel = new Label
         {
             Text = "欢迎在 GitHub 扫码支持，多少都是鼓励，万分感谢",
-            Location = new Point(15, y),
-            Size = new Size(340, 18),
+            Location = new Point(12, y),
+            Size = new Size(310, 18),
             ForeColor = SystemColors.GrayText
         };
         Controls.Add(donateLabel);
-        y += 25;
+        y += 28;
 
-        // 确定 / 取消
-        var okBtn = new Button { Text = "确定", DialogResult = DialogResult.OK, Location = new Point(190, y), Size = new Size(80, 28) };
+        // 确定（右下角）
+        var okBtn = new Button { Text = "确定", DialogResult = DialogResult.OK, Location = new Point(248, y), Size = new Size(80, 28) };
         okBtn.Click += (s, e) => ApplyValues();
         Controls.Add(okBtn);
-        var cancelBtn = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Location = new Point(280, y), Size = new Size(80, 28) };
-        Controls.Add(cancelBtn);
 
         AcceptButton = okBtn;
-        CancelButton = cancelBtn;
+    }
+
+    // 恢复默认：仅重置动效、颜色、大小，不影响快捷键和开机自启动
+    void ResetEffects()
+    {
+        var defaults = new AppConfig();
+        if (_leftEffectCombo.Items.Contains(defaults.LeftEffect))
+            _leftEffectCombo.SelectedItem = defaults.LeftEffect;
+        else if (_leftEffectCombo.Items.Count > 0)
+            _leftEffectCombo.SelectedIndex = 0;
+        if (_rightEffectCombo.Items.Contains(defaults.RightEffect))
+            _rightEffectCombo.SelectedItem = defaults.RightEffect;
+        else if (_rightEffectCombo.Items.Count > 0)
+            _rightEffectCombo.SelectedIndex = 0;
+        _leftHex.Text = defaults.LeftClick.Primary;
+        _rightHex.Text = defaults.RightClick.Primary;
+        _currentScale = defaults.EffectScale;
+        _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x";
     }
 
     void HotkeyTextBox_KeyDown(object sender, KeyEventArgs e)
@@ -506,6 +571,8 @@ class ConfigForm : Form
         _rightHex.Text = config.RightClick.Primary;
 
         _autoStartCheckBox.Checked = config.AutoStart;
+        _currentScale = Math.Max(0.3f, Math.Min(3.0f, config.EffectScale));
+        _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x";
         _hotkeyModifiers = config.HotkeyModifiers;
         _hotkeyKey = config.HotkeyKey;
         _hotkeyTextBox.Text = HotkeyToString(_hotkeyModifiers, _hotkeyKey);
@@ -513,19 +580,7 @@ class ConfigForm : Form
 
     void ApplyValues()
     {
-        Result = new AppConfig();
-        Result.LeftEffect = (_leftEffectCombo.SelectedItem as string) ?? "线条爆发";
-        Result.RightEffect = (_rightEffectCombo.SelectedItem as string) ?? "线条爆发";
-        Result.LeftClick = new ColorConfig(NormalizeHexValue(_leftHex.Text));
-        Result.LeftClick.GlowIntensity = _originalConfig.LeftClick.GlowIntensity;
-        Result.RightClick = new ColorConfig(NormalizeHexValue(_rightHex.Text));
-        Result.RightClick.GlowIntensity = _originalConfig.RightClick.GlowIntensity;
-        Result.InfoText = _originalConfig.InfoText;
-        Result.InfoUrl = _originalConfig.InfoUrl;
-        Result.AutoStart = _autoStartCheckBox.Checked;
-        Result.HotkeyModifiers = _hotkeyModifiers;
-        Result.HotkeyKey = _hotkeyKey;
-
+        Result = BuildCurrentConfig();
         // 同步开机自启动注册表
         ConfigManager.SetAutoStart(Result.AutoStart);
     }
