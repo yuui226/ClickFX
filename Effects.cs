@@ -1110,8 +1110,11 @@ class FingerEffect : IClickEffect
         float tipDirX = (float)Math.Sin(rotRad);
         float tipDirY = -(float)Math.Cos(rotRad);
 
-        float endPx = cx - tipDirX * tipOff;
-        float endPy = cy - tipDirY * tipOff;
+        // 右侧垂直方向偏移（相对手指朝向）
+        float perpX = -tipDirY;
+        float perpY = tipDirX;
+        float endPx = cx - tipDirX * tipOff + perpX * 5f * scale;
+        float endPy = cy - tipDirY * tipOff + perpY * 5f * scale;
         float startPx = endPx - tipDirX * StartDist * scale;
         float startPy = endPy - tipDirY * StartDist * scale;
 
@@ -1136,9 +1139,9 @@ class FingerEffect : IClickEffect
         g.TranslateTransform(px, py);
         g.RotateTransform(data.RotationDeg);
 
-        var destRect = new Rectangle(
-            (int)(-drawW / 2f), (int)(-drawH / 2f),
-            (int)drawW, (int)drawH);
+        int dw = (int)Math.Round(drawW);
+        int dh = (int)Math.Round(drawH);
+        var destRect = new Rectangle(-dw / 2, -dh / 2, dw, dh);
         g.DrawImage(data.EmojiBmp, destRect,
             0, 0, data.EmojiBmp.Width, data.EmojiBmp.Height,
             GraphicsUnit.Pixel, _imgAttrs);
