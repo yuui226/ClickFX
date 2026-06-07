@@ -556,7 +556,7 @@ class ConfigForm : Form
         }
     }
 
-    static string HotkeyToString(int mods, int key)
+    internal static string HotkeyToString(int mods, int key)
     {
         if (mods == 0 && key == 0) return "";
         var parts = new List<string>();
@@ -668,6 +668,7 @@ class HotkeyDialog : Form
     public int Modifiers { get; private set; }
     public int Key { get; private set; }
     Label _hintLabel;
+    bool _captured;
 
     public HotkeyDialog()
     {
@@ -700,14 +701,33 @@ class HotkeyDialog : Form
 
         if (!e.Control && !e.Alt && !e.Shift) return;
 
-        int mods = 0;
-        if (e.Alt) mods |= 0x0001;
-        if (e.Control) mods |= 0x0002;
-        if (e.Shift) mods |= 0x0004;
+        // 只记录非修饰键，不立即关闭
+        if (e.KeyCode != Keys.ControlKey && e.KeyCode != Keys.Menu
+            && e.KeyCode != Keys.ShiftKey && e.KeyCode != Keys.LWin
+            && e.KeyCode != Keys.RWin)
+        {
+            int mods = 0;
+            if (e.Alt) mods |= 0x0001;
+            if (e.Control) mods |= 0x0002;
+            if (e.Shift) mods |= 0x0004;
 
-        Modifiers = mods;
-        Key = (int)e.KeyCode;
-        DialogResult = DialogResult.OK;
-        Close();
+            Modifiers = mods;
+            Key = (int)e.KeyCode;
+            _captured = true;
+
+            _hintLabel.Text = ConfigForm.HotkeyToString(mods, (int)e.KeyCode)
+                + "\n松开按键确认...";
+        }
+    }
+
+    protected override void OnKeyUp(KeyEventArgs e)
+    {
+        base.OnKeyUp(e);
+        // 所有键松开后才确认
+        if (_captured && !e.Control && !e.Alt && !e.Shift)
+        {
+            DialogResult = DialogResult.OK;
+            Close();
+        }
     }
 }
