@@ -44,11 +44,13 @@ class ColorConfig
 {
     public string Primary { get; set; }
     public float GlowIntensity { get; set; }
+    public bool RandomColor { get; set; }
 
     public ColorConfig()
     {
         Primary = "#508CFF";
         GlowIntensity = 0.3f;
+        RandomColor = false;
     }
 
     public ColorConfig(string primary) : this()
@@ -155,7 +157,8 @@ static class ConfigManager
     {
         return "{ \"Primary\": " + Quote(c.Primary)
             + ", \"GlowIntensity\": " + c.GlowIntensity.ToString("0.0####",
-                System.Globalization.CultureInfo.InvariantCulture) + " }";
+                System.Globalization.CultureInfo.InvariantCulture)
+            + ", \"RandomColor\": " + (c.RandomColor ? "true" : "false") + " }";
     }
 
     static string Quote(string s)
@@ -216,6 +219,8 @@ static class ConfigManager
             System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out f))
             c.GlowIntensity = f;
+        if (d.ContainsKey("RandomColor"))
+            c.RandomColor = d["RandomColor"].ToLower() == "true";
         return c;
     }
 
@@ -322,13 +327,14 @@ class ConfigForm : Form
     Panel _leftPreview, _rightPreview;
     TextBox _leftHex, _rightHex;
     Button _leftPick, _rightPick;
+    CheckBox _leftRandomBtn, _rightRandomBtn;
     LinkLabel _projectLink;
 
     CheckBox _autoStartCheckBox;
     Label _scaleValueLabel;
     float _currentScale = 1.0f;
-    TextBox _hotkeyTextBox;
-    Button _hotkeyClearBtn;
+    Label _hotkeyDisplayLabel;
+    Button _hotkeySetBtn, _hotkeyClearBtn;
 
     AppConfig _originalConfig;
     int _hotkeyModifiers, _hotkeyKey;
@@ -351,8 +357,10 @@ class ConfigForm : Form
         c.RightEffect = (_rightEffectCombo.SelectedItem as string) ?? "线条爆发";
         c.LeftClick = new ColorConfig(NormalizeHexValue(_leftHex.Text));
         c.LeftClick.GlowIntensity = _originalConfig.LeftClick.GlowIntensity;
+        c.LeftClick.RandomColor = _leftRandomBtn.Checked;
         c.RightClick = new ColorConfig(NormalizeHexValue(_rightHex.Text));
         c.RightClick.GlowIntensity = _originalConfig.RightClick.GlowIntensity;
+        c.RightClick.RandomColor = _rightRandomBtn.Checked;
         c.InfoText = _originalConfig.InfoText;
         c.InfoUrl = _originalConfig.InfoUrl;
         c.AutoStart = _autoStartCheckBox.Checked;
@@ -375,7 +383,7 @@ class ConfigForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(340, 300);
+        ClientSize = new Size(344, 286);
 
         int y = 15;
 
@@ -390,13 +398,16 @@ class ConfigForm : Form
         _leftEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
         _leftEffectCombo.SelectedIndexChanged += (s, e) => NotifyPreview();
         Controls.Add(_leftEffectCombo);
-        _leftPreview = new Panel { Location = new Point(168, y + 2), Size = new Size(22, 20), BorderStyle = BorderStyle.FixedSingle };
+        _leftPreview = new Panel { Location = new Point(168, y), Size = new Size(20, 20), BorderStyle = BorderStyle.FixedSingle };
         Controls.Add(_leftPreview);
-        _leftHex = new TextBox { Location = new Point(194, y + 2), Size = new Size(75, 22) };
+        _leftHex = new TextBox { Location = new Point(194, y), Size = new Size(55, 25) };
         Controls.Add(_leftHex);
-        _leftPick = new Button { Text = "选色", Location = new Point(270, y - 2), Size = new Size(40, 24) };
+        _leftPick = new Button { Text = "选色", Location = new Point(250, y - 1), Size = new Size(40, 25) };
         _leftPick.Click += (s, e) => PickColor(_leftHex, _leftPreview);
         Controls.Add(_leftPick);
+        _leftRandomBtn = new CheckBox { Text = "随机", Location = new Point(292, y - 1), Size = new Size(40, 25), Appearance = Appearance.Button, TextAlign = ContentAlignment.MiddleCenter };
+        _leftRandomBtn.CheckedChanged += (s, e) => ToggleRandom(_leftRandomBtn.Checked, _leftHex, _leftPick, _leftPreview);
+        Controls.Add(_leftRandomBtn);
         y += 32;
 
         // 右键：标签 + 动效下拉 + 颜色选择
@@ -410,13 +421,16 @@ class ConfigForm : Form
         _rightEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
         _rightEffectCombo.SelectedIndexChanged += (s, e) => NotifyPreview();
         Controls.Add(_rightEffectCombo);
-        _rightPreview = new Panel { Location = new Point(168, y + 2), Size = new Size(22, 20), BorderStyle = BorderStyle.FixedSingle };
+        _rightPreview = new Panel { Location = new Point(168, y), Size = new Size(20, 20), BorderStyle = BorderStyle.FixedSingle };
         Controls.Add(_rightPreview);
-        _rightHex = new TextBox { Location = new Point(194, y + 2), Size = new Size(75, 22) };
+        _rightHex = new TextBox { Location = new Point(194, y), Size = new Size(55, 25) };
         Controls.Add(_rightHex);
-        _rightPick = new Button { Text = "选色", Location = new Point(270, y - 2), Size = new Size(40, 24) };
+        _rightPick = new Button { Text = "选色", Location = new Point(250, y - 1), Size = new Size(40, 25) };
         _rightPick.Click += (s, e) => PickColor(_rightHex, _rightPreview);
         Controls.Add(_rightPick);
+        _rightRandomBtn = new CheckBox { Text = "随机", Location = new Point(292, y - 1), Size = new Size(40, 25), Appearance = Appearance.Button, TextAlign = ContentAlignment.MiddleCenter };
+        _rightRandomBtn.CheckedChanged += (s, e) => ToggleRandom(_rightRandomBtn.Checked, _rightHex, _rightPick, _rightPreview);
+        Controls.Add(_rightRandomBtn);
         y += 35;
 
         // HEX 输入变化时更新预览
@@ -434,35 +448,37 @@ class ConfigForm : Form
             AutoSize = true,
         };
         Controls.Add(_scaleValueLabel);
-        var scaleMinusBtn = new Button { Text = "↓", Location = new Point(118, y), Size = new Size(28, 24) };
+        var scaleMinusBtn = new Button { Text = "↓", Location = new Point(118, y - 3), Size = new Size(24, 24), TextAlign = ContentAlignment.MiddleCenter };
         scaleMinusBtn.Click += (s, e) => { _currentScale = Math.Max(0.3f, (float)Math.Round(_currentScale - 0.1f, 1)); _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x"; NotifyPreview(); };
         Controls.Add(scaleMinusBtn);
-        var scalePlusBtn = new Button { Text = "↑", Location = new Point(150, y), Size = new Size(28, 24) };
+        var scalePlusBtn = new Button { Text = "↑", Location = new Point(146, y - 3), Size = new Size(24, 24), TextAlign = ContentAlignment.MiddleCenter };
         scalePlusBtn.Click += (s, e) => { _currentScale = Math.Min(3.0f, (float)Math.Round(_currentScale + 0.1f, 1)); _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x"; NotifyPreview(); };
         Controls.Add(scalePlusBtn);
-        y += 32;
-
-        // 恢复默认（仅动效相关）
-        var resetBtn = new Button { Text = "恢复默认", Location = new Point(12, y), Size = new Size(70, 24) };
+        var resetBtn = new Button { Text = "恢复默认", Location = new Point(262, y - 3), Size = new Size(70, 24) };
         resetBtn.Click += (s, e) => ResetEffects();
         Controls.Add(resetBtn);
-        y += 34;
+        y += 32;
 
-        // 开关快捷键
-        Controls.Add(new Label { Text = "开关快捷键", Location = new Point(12, y + 3), AutoSize = true });
-        _hotkeyTextBox = new TextBox
+        // 显示快捷键
+        Controls.Add(new Label { Text = "快捷键：", Location = new Point(12, y + 3), AutoSize = true });
+        y += 24;
+        Controls.Add(new Label { Text = "启用/暂停", Location = new Point(12, y + 3), AutoSize = true });
+        _hotkeyDisplayLabel = new Label
         {
-            Location = new Point(90, y),
-            Size = new Size(160, 22),
-            ReadOnly = true,
-            BackColor = SystemColors.Window
+            Text = HotkeyToString(_hotkeyModifiers, _hotkeyKey),
+            Location = new Point(80, y + 1),
+            Size = new Size(148, 18),
+            AutoSize = false,
+            BorderStyle = BorderStyle.FixedSingle,
+            BackColor = SystemColors.ControlLight,
+            TextAlign = ContentAlignment.MiddleLeft
         };
-        _hotkeyTextBox.KeyDown += HotkeyTextBox_KeyDown;
-        _hotkeyTextBox.GotFocus += (s, e) => _hotkeyTextBox.BackColor = SystemColors.Info;
-        _hotkeyTextBox.LostFocus += (s, e) => _hotkeyTextBox.BackColor = SystemColors.Window;
-        Controls.Add(_hotkeyTextBox);
-        _hotkeyClearBtn = new Button { Text = "清除", Location = new Point(254, y - 1), Size = new Size(46, 24) };
-        _hotkeyClearBtn.Click += (s, e) => { _hotkeyModifiers = 0; _hotkeyKey = 0; _hotkeyTextBox.Text = ""; };
+        Controls.Add(_hotkeyDisplayLabel);
+        _hotkeySetBtn = new Button { Text = "设置", Location = new Point(232, y - 1), Size = new Size(50, 24) };
+        _hotkeySetBtn.Click += (s, e) => SetHotkey();
+        Controls.Add(_hotkeySetBtn);
+        _hotkeyClearBtn = new Button { Text = "清除", Location = new Point(286, y - 1), Size = new Size(46, 24) };
+        _hotkeyClearBtn.Click += (s, e) => { _hotkeyModifiers = 0; _hotkeyKey = 0; _hotkeyDisplayLabel.Text = ""; };
         Controls.Add(_hotkeyClearBtn);
         y += 30;
 
@@ -521,27 +537,23 @@ class ConfigForm : Form
             _rightEffectCombo.SelectedIndex = 0;
         _leftHex.Text = defaults.LeftClick.Primary;
         _rightHex.Text = defaults.RightClick.Primary;
+        _leftRandomBtn.Checked = false;
+        _rightRandomBtn.Checked = false;
         _currentScale = defaults.EffectScale;
         _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x";
     }
 
-    void HotkeyTextBox_KeyDown(object sender, KeyEventArgs e)
+    void SetHotkey()
     {
-        e.SuppressKeyPress = true;
-        e.Handled = true;
-
-        // 至少需要一个修饰键
-        if (!e.Control && !e.Alt && !e.Shift) return;
-
-        int mods = 0;
-        if (e.Alt) mods |= 0x0001;    // MOD_ALT
-        if (e.Control) mods |= 0x0002; // MOD_CTRL
-        if (e.Shift) mods |= 0x0004;   // MOD_SHIFT
-
-        int key = (int)e.KeyCode;
-        _hotkeyModifiers = mods;
-        _hotkeyKey = key;
-        _hotkeyTextBox.Text = HotkeyToString(mods, key);
+        using (var dlg = new HotkeyDialog())
+        {
+            if (dlg.ShowDialog() == DialogResult.OK)
+            {
+                _hotkeyModifiers = dlg.Modifiers;
+                _hotkeyKey = dlg.Key;
+                _hotkeyDisplayLabel.Text = HotkeyToString(_hotkeyModifiers, _hotkeyKey);
+            }
+        }
     }
 
     static string HotkeyToString(int mods, int key)
@@ -569,13 +581,15 @@ class ConfigForm : Form
 
         _leftHex.Text = config.LeftClick.Primary;
         _rightHex.Text = config.RightClick.Primary;
+        _leftRandomBtn.Checked = config.LeftClick.RandomColor;
+        _rightRandomBtn.Checked = config.RightClick.RandomColor;
 
         _autoStartCheckBox.Checked = config.AutoStart;
         _currentScale = Math.Max(0.3f, Math.Min(3.0f, config.EffectScale));
         _scaleValueLabel.Text = _currentScale.ToString("0.0") + "x";
         _hotkeyModifiers = config.HotkeyModifiers;
         _hotkeyKey = config.HotkeyKey;
-        _hotkeyTextBox.Text = HotkeyToString(_hotkeyModifiers, _hotkeyKey);
+        _hotkeyDisplayLabel.Text = HotkeyToString(_hotkeyModifiers, _hotkeyKey);
     }
 
     void ApplyValues()
@@ -583,6 +597,14 @@ class ConfigForm : Form
         Result = BuildCurrentConfig();
         // 同步开机自启动注册表
         ConfigManager.SetAutoStart(Result.AutoStart);
+    }
+
+    void ToggleRandom(bool random, TextBox hexBox, Button pickBtn, Panel preview)
+    {
+        hexBox.Enabled = !random;
+        pickBtn.Enabled = !random;
+        preview.BackColor = random ? SystemColors.Control : (ParseHexColor(hexBox.Text) ?? SystemColors.Control);
+        NotifyPreview();
     }
 
     void PickColor(TextBox hexBox, Panel preview)
@@ -636,5 +658,56 @@ class ConfigForm : Form
     static string ColorToHex(Color c)
     {
         return string.Format("#{0:X2}{1:X2}{2:X2}", c.R, c.G, c.B);
+    }
+}
+
+// ==================== 快捷键设置对话框 ====================
+
+class HotkeyDialog : Form
+{
+    public int Modifiers { get; private set; }
+    public int Key { get; private set; }
+    Label _hintLabel;
+
+    public HotkeyDialog()
+    {
+        Text = "设置快捷键";
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterParent;
+        ClientSize = new Size(260, 100);
+        KeyPreview = true;
+
+        _hintLabel = new Label
+        {
+            Text = "请按下快捷键组合...\n（至少包含一个修饰键：Ctrl/Alt/Shift）",
+            Location = new Point(12, 12),
+            Size = new Size(236, 40),
+            TextAlign = ContentAlignment.MiddleCenter
+        };
+        Controls.Add(_hintLabel);
+
+        var cancelBtn = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Location = new Point(170, 66), Size = new Size(76, 26) };
+        Controls.Add(cancelBtn);
+        CancelButton = cancelBtn;
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        e.SuppressKeyPress = true;
+
+        if (!e.Control && !e.Alt && !e.Shift) return;
+
+        int mods = 0;
+        if (e.Alt) mods |= 0x0001;
+        if (e.Control) mods |= 0x0002;
+        if (e.Shift) mods |= 0x0004;
+
+        Modifiers = mods;
+        Key = (int)e.KeyCode;
+        DialogResult = DialogResult.OK;
+        Close();
     }
 }

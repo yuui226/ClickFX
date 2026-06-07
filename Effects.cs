@@ -32,16 +32,51 @@ class AnimationState
     public float Scale = 1f; // 效果大小缩放系数
     Color _cachedColor;
     bool _colorCached;
+    static readonly Random _colorRng = new Random();
 
     public Color GetColor(ColorConfig config)
     {
         if (!_colorCached)
         {
-            try { _cachedColor = ColorTranslator.FromHtml(config.Primary); }
-            catch { _cachedColor = Color.White; }
+            if (config.RandomColor)
+            {
+                _cachedColor = RandomHSVColor();
+            }
+            else
+            {
+                try { _cachedColor = ColorTranslator.FromHtml(config.Primary); }
+                catch { _cachedColor = Color.White; }
+            }
             _colorCached = true;
         }
         return _cachedColor;
+    }
+
+    static Color RandomHSVColor()
+    {
+        double h, s, v;
+        lock (_colorRng)
+        {
+            h = _colorRng.NextDouble() * 360.0;
+            s = 0.7 + _colorRng.NextDouble() * 0.3;  // 0.7 ~ 1.0
+            v = 0.8 + _colorRng.NextDouble() * 0.2;  // 0.8 ~ 1.0
+        }
+        int hi = (int)(h / 60) % 6;
+        double f = h / 60 - Math.Floor(h / 60);
+        double p = v * (1 - s);
+        double q = v * (1 - f * s);
+        double t = v * (1 - (1 - f) * s);
+        double r, g, b;
+        switch (hi)
+        {
+            case 0: r = v; g = t; b = p; break;
+            case 1: r = q; g = v; b = p; break;
+            case 2: r = p; g = v; b = t; break;
+            case 3: r = p; g = q; b = v; break;
+            case 4: r = t; g = p; b = v; break;
+            default: r = v; g = p; b = q; break;
+        }
+        return Color.FromArgb((int)(r * 255), (int)(g * 255), (int)(b * 255));
     }
 }
 
