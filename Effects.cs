@@ -1483,7 +1483,9 @@ static class EffectRegistry
     public static void Cleanup()
     {
         foreach (var kv in _effects)
-            kv.Value.Cleanup();
+        {
+            try { kv.Value.Cleanup(); } catch { }
+        }
         _effects.Clear();
     }
 }

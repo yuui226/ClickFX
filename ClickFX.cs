@@ -509,9 +509,11 @@ class OverlayForm : Form
 
         _cachedHBitmap = NativeMethods.CreateDIBSection(IntPtr.Zero, ref bih, 0,
             out _cachedPBits, IntPtr.Zero, 0);
+        if (_cachedHBitmap == IntPtr.Zero) return;
         if (_cachedHdcScreen == IntPtr.Zero)
             _cachedHdcScreen = NativeMethods.GetDC(IntPtr.Zero);
         _cachedHdcMem = NativeMethods.CreateCompatibleDC(_cachedHdcScreen);
+        if (_cachedHdcMem == IntPtr.Zero) { NativeMethods.DeleteObject(_cachedHBitmap); _cachedHBitmap = IntPtr.Zero; return; }
         _cachedOldObj = NativeMethods.SelectObject(_cachedHdcMem, _cachedHBitmap);
         _cachedGraphics = Graphics.FromHdc(_cachedHdcMem);
         _cachedGraphics.SmoothingMode = SmoothingMode.AntiAlias;

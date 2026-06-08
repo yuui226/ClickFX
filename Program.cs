@@ -47,15 +47,14 @@ static class Program
         ConfigManager.SetAutoStart(config.AutoStart);
 
         var manager = new OverlayManager();
-        manager.Start();
-
         try
         {
+            manager.Start();
             Application.Run();
         }
         finally
         {
-            ConfigManager.Save(manager.Config);
+            try { ConfigManager.Save(manager.Config); } catch { }
             manager.Dispose();
             EffectRegistry.Cleanup();
             GC.KeepAlive(_mutex);
