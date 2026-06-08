@@ -658,11 +658,14 @@ class VortexEffect : IClickEffect
             float baseSize = data.Sizes[i] * scale;
 
             // 绘制拖尾（3 个历史位置）
+            float baseAngle = data.InitAngles[i];
+            float spiralDelta = data.Directions[i] * data.SpiralSpeeds[i];
+            float maxR = MaxRadius * scale;
             for (int trail = 3; trail >= 0; trail--)
             {
                 float trailT = Math.Max(0f, t - trail * 0.04f);
-                float trailAngle = data.InitAngles[i] + data.Directions[i] * data.SpiralSpeeds[i] * trailT;
-                float trailRadius = MaxRadius * scale * Easing.EaseOutQuad(trailT);
+                float trailAngle = baseAngle + spiralDelta * trailT;
+                float trailRadius = maxR * Easing.EaseOutQuad(trailT);
 
                 float px = cx + (float)Math.Cos(trailAngle) * trailRadius;
                 float py = cy + (float)Math.Sin(trailAngle) * trailRadius;
@@ -1000,27 +1003,30 @@ class MeteorEffect : IClickEffect
         float headX = cx + Bezier(data.P0X, data.P1X, data.P2X, moveT) * scale;
         float headY = cy + Bezier(data.P0Y, data.P1Y, data.P2Y, moveT) * scale;
 
-        // ---- 多段渐隐拖尾 ----
+        // ---- 多段渐隐拖尾（预计算 Bezier 点，避免每段重复求值） ----
+        float segStep = TrailDuration / TrailSegments;
+        float[] trailPx = new float[TrailSegments + 1];
+        float[] trailPy = new float[TrailSegments + 1];
+        for (int i = 0; i <= TrailSegments; i++)
+        {
+            float st = moveT - i * segStep;
+            if (st < 0f) st = 0f;
+            trailPx[i] = cx + Bezier(data.P0X, data.P1X, data.P2X, st) * scale;
+            trailPy[i] = cy + Bezier(data.P0Y, data.P1Y, data.P2Y, st) * scale;
+        }
         for (int i = 0; i < TrailSegments; i++)
         {
-            float segT = moveT - (float)i / TrailSegments * TrailDuration;
+            float segT = moveT - i * segStep;
             if (segT < 0f) continue;
 
             float segAlpha = 1f - (float)i / TrailSegments;
             int a = (int)(255 * alpha * segAlpha * segAlpha);
             if (a <= 0) continue;
 
-            float sx = cx + Bezier(data.P0X, data.P1X, data.P2X, segT) * scale;
-            float sy = cy + Bezier(data.P0Y, data.P1Y, data.P2Y, segT) * scale;
-            float ex = cx + Bezier(data.P0X, data.P1X, data.P2X,
-                Math.Max(0f, segT - TrailDuration / TrailSegments)) * scale;
-            float ey = cy + Bezier(data.P0Y, data.P1Y, data.P2Y,
-                Math.Max(0f, segT - TrailDuration / TrailSegments)) * scale;
-
             float width = (2.5f - 1.8f * (float)i / TrailSegments) * scale;
             _trailPen.Color = Color.FromArgb(a, baseColor);
             _trailPen.Width = width;
-            g.DrawLine(_trailPen, sx, sy, ex, ey);
+            g.DrawLine(_trailPen, trailPx[i], trailPy[i], trailPx[i + 1], trailPy[i + 1]);
         }
 
         // ---- 头部辉光 ----
