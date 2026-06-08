@@ -202,6 +202,7 @@ class OverlayManager : IDisposable
     LowLevelMouseProc _hookProc;
     NotifyIcon _trayIcon;
     Icon _trayIconHandle;
+    ContextMenuStrip _contextMenu;
     ToolStripMenuItem _toggleItem;
     HotkeyForm _hotkeyForm;
     volatile bool _enabled = true;
@@ -228,6 +229,7 @@ class OverlayManager : IDisposable
         _trayIcon.Visible = true;
 
         var menu = new ContextMenuStrip();
+        _contextMenu = menu;
 
         var settingsItem = new ToolStripMenuItem("设置");
         settingsItem.Click += (s, e) => OpenSettings();
@@ -485,6 +487,11 @@ class OverlayManager : IDisposable
         {
             _trayIconHandle.Dispose();
             _trayIconHandle = null;
+        }
+        if (_contextMenu != null)
+        {
+            _contextMenu.Dispose();
+            _contextMenu = null;
         }
     }
 }

@@ -152,7 +152,7 @@ static class ConfigManager
             + "  \"AutoStart\": " + (c.AutoStart ? "true" : "false") + ",\n"
             + "  \"HotkeyModifiers\": " + c.HotkeyModifiers + ",\n"
             + "  \"HotkeyKey\": " + c.HotkeyKey + ",\n"
-            + "  \"EffectScale\": " + c.EffectScale.ToString("0.0##",
+            + "  \"EffectScale\": " + c.EffectScale.ToString("0.0###",
                 System.Globalization.CultureInfo.InvariantCulture) + ",\n"
             + "  \"TriggerMode\": " + Quote(c.TriggerMode ?? "Up") + "\n"
             + "}";
@@ -267,7 +267,7 @@ static class ConfigManager
                 {
                     if (json[i] == '{') depth++;
                     else if (json[i] == '}') { depth--; if (depth == 0) { i++; break; } }
-                    else if (json[i] == '"') { i++; while (i < json.Length && json[i] != '"') { if (json[i] == '\\') i++; i++; } }
+                    else if (json[i] == '"') { i++; while (i < json.Length && json[i] != '"') { if (json[i] == '\\' && i + 1 < json.Length) i += 2; else i++; } }
                     i++;
                 }
                 value = json.Substring(start, i - start).Trim();

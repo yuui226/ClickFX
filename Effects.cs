@@ -468,13 +468,13 @@ class StarEffect : IClickEffect
             float sz = s.Size * anim.Scale * sizeScale;
             if (sz < 0.3f) continue;
 
-            float rot = s.InitRot + s.RotSpeed * localT * (float)Math.PI / 180f;
+            float deltaRot = s.RotSpeed * localT * (float)Math.PI / 180f;
 
             int a = (int)(255 * alpha);
 
             _pen.Width = 1.5f * sizeScale;
             _pen.Color = Color.FromArgb((int)(255 * Math.Min(1f, alpha * 1.2f)), baseColor);
-            DrawStar(g, px, py, sz, _pen, s.CosDirs, s.SinDirs);
+            DrawStar(g, px, py, sz, _pen, s.CosDirs, s.SinDirs, deltaRot);
 
             _brush.Color = Color.FromArgb(a, Color.White);
             float dotR = sz * 0.15f;
@@ -482,25 +482,28 @@ class StarEffect : IClickEffect
         }
     }
 
-    // 使用预计算方向向量绘制星星，避免每帧 trig 调用
+    // 使用预计算方向向量绘制星星，deltaRot 为相对于 InitRot 的旋转增量（弧度）
     static void DrawStar(Graphics g, float cx, float cy, float radius, Pen pen,
-        float[] cosDirs, float[] sinDirs)
+        float[] cosDirs, float[] sinDirs, float deltaRot)
     {
+        float cosR = (float)Math.Cos(deltaRot);
+        float sinR = (float)Math.Sin(deltaRot);
         float inner = radius * 0.35f;
         for (int i = 0; i < StarPoints; i++)
         {
             int j = (i + 1) % StarPoints;
-            float x1 = cx + cosDirs[i * 2] * radius;
-            float y1 = cy + sinDirs[i * 2] * radius;
-            float x2 = cx + cosDirs[i * 2 + 1] * inner;
-            float y2 = cy + sinDirs[i * 2 + 1] * inner;
+            float oc0 = cosDirs[i * 2], os0 = sinDirs[i * 2];
+            float oc1 = cosDirs[i * 2 + 1], os1 = sinDirs[i * 2 + 1];
+            float x1 = cx + (oc0 * cosR - os0 * sinR) * radius;
+            float y1 = cy + (oc0 * sinR + os0 * cosR) * radius;
+            float x2 = cx + (oc1 * cosR - os1 * sinR) * inner;
+            float y2 = cy + (oc1 * sinR + os1 * cosR) * inner;
             g.DrawLine(pen, x1, y1, x2, y2);
 
-            float x3 = x2;
-            float y3 = y2;
-            float x4 = cx + cosDirs[j * 2] * radius;
-            float y4 = cy + sinDirs[j * 2] * radius;
-            g.DrawLine(pen, x3, y3, x4, y4);
+            float nc0 = cosDirs[j * 2], ns0 = sinDirs[j * 2];
+            float x4 = cx + (nc0 * cosR - ns0 * sinR) * radius;
+            float y4 = cy + (nc0 * sinR + ns0 * cosR) * radius;
+            g.DrawLine(pen, x2, y2, x4, y4);
         }
     }
 }
@@ -1418,7 +1421,9 @@ class LightningEffect : IClickEffect
 
                 if (bSegNear > branchRevealEased)
                 {
-                    float bp = (branchRevealEased - bSegFar) / (bSegNear - bSegFar);
+                    float bDenom = bSegNear - bSegFar;
+                    if (bDenom <= 0f) continue;
+                    float bp = (branchRevealEased - bSegFar) / bDenom;
                     x2 = x1 + (x2 - x1) * bp;
                     y2 = y1 + (y2 - y1) * bp;
                 }
