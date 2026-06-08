@@ -568,20 +568,19 @@ class PetalEffect : IClickEffect
         float hw = PetalWidth * effectScale * scale * data.SizeVar;
 
         _petalBrush.Color = Color.FromArgb(a, baseColor);
-        GraphicsState state = g.Save();
         for (int i = 0; i < data.PetalCount; i++)
         {
             float angle = baseRotRad + i * angleStep;
             float pcx = cx + (float)Math.Cos(angle) * dist;
             float pcy = cy + (float)Math.Sin(angle) * dist;
 
-            g.Transform.Reset();
+            GraphicsState state = g.Save();
             g.TranslateTransform(pcx, pcy);
             g.RotateTransform(angle * 180f / (float)Math.PI);
 
             g.FillEllipse(_petalBrush, -hl, -hw, hl * 2, hw * 2);
+            g.Restore(state);
         }
-        g.Restore(state);
     }
 }
 
