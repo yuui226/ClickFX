@@ -26,12 +26,12 @@ class AnimationState : IDisposable
     public int Duration;
     public MouseButtons Button;
     public int RandomSeed;
-    public string EffectName;
     public IClickEffect CachedEffect;
     public object EffectData; // 各效果缓存的预计算数据，每动画只算一次
     public float Scale = 1f; // 效果大小缩放系数
     Color _cachedColor;
     bool _colorCached;
+    // 仅在 UI 线程（OnPaint → Draw）调用，无需加锁
     static readonly Random _colorRng = new Random();
 
     public Color GetColor(ColorConfig config)
@@ -54,13 +54,9 @@ class AnimationState : IDisposable
 
     static Color RandomHSVColor()
     {
-        double h, s, v;
-        lock (_colorRng)
-        {
-            h = _colorRng.NextDouble() * 360.0;
-            s = 0.7 + _colorRng.NextDouble() * 0.3;  // 0.7 ~ 1.0
-            v = 0.8 + _colorRng.NextDouble() * 0.2;  // 0.8 ~ 1.0
-        }
+        double h = _colorRng.NextDouble() * 360.0;
+        double s = 0.7 + _colorRng.NextDouble() * 0.3;  // 0.7 ~ 1.0
+        double v = 0.8 + _colorRng.NextDouble() * 0.2;  // 0.8 ~ 1.0
         int hi = (int)(h / 60) % 6;
         double f = h / 60 - Math.Floor(h / 60);
         double p = v * (1 - s);
@@ -94,6 +90,8 @@ class AnimationState : IDisposable
 
 static class Easing
 {
+    public static readonly float PI = (float)Math.PI;
+
     public static float EaseOutBack(float t)
     {
         const float c1 = 1.70158f;
@@ -129,7 +127,6 @@ class LineBurstEffect : IClickEffect
     static readonly float[] LineLengths = { 10f, 11f, 10f };
     static readonly float[] LineDelays = { 0f, 0.0375f, 0.075f };
     static readonly float[] DirX, DirY;
-    static readonly float PI = (float)Math.PI;
 
     static LineBurstEffect()
     {
@@ -138,7 +135,7 @@ class LineBurstEffect : IClickEffect
         DirY = new float[3];
         for (int i = 0; i < 3; i++)
         {
-            float rad = angles[i] * PI / 180f;
+            float rad = angles[i] * Easing.PI / 180f;
             DirX[i] = (float)Math.Cos(rad);
             DirY[i] = (float)Math.Sin(rad);
         }
@@ -368,6 +365,7 @@ class StarEffect : IClickEffect
     public int Duration { get { return 500; } }
 
     const int StarCount = 7;
+    const int StarPoints = 4;
     const float MaxDist = 28f;
     const float BaseSize = 2.8f;
     const float SizeJitter = 1.8f;
@@ -378,6 +376,7 @@ class StarEffect : IClickEffect
         public float Delay, Life, Dist, Size, Bri;
         public float Curve, TwinkleSpeed, InitRot, RotSpeed;
         public float CosAngle, SinAngle, CosPerp, SinPerp;
+        public float[] CosDirs, SinDirs; // 预计算方向向量，避免每帧 trig
     }
 
     Pen _pen = new Pen(Color.Black, 1.2f);
@@ -406,6 +405,18 @@ class StarEffect : IClickEffect
             {
                 float angle = (float)(rng.NextDouble() * Math.PI * 2);
                 float perp = angle + (float)Math.PI / 2f;
+                // 预计算星星顶点方向向量，避免 Draw 中每帧 trig 调用
+                float[] cosDirs = new float[StarPoints * 2];
+                float[] sinDirs = new float[StarPoints * 2];
+                for (int j = 0; j < StarPoints; j++)
+                {
+                    float a1 = angle + j * (float)(Math.PI * 2) / StarPoints;
+                    float a2 = a1 + (float)Math.PI / StarPoints;
+                    cosDirs[j * 2] = (float)Math.Cos(a1);
+                    sinDirs[j * 2] = (float)Math.Sin(a1);
+                    cosDirs[j * 2 + 1] = (float)Math.Cos(a2);
+                    sinDirs[j * 2 + 1] = (float)Math.Sin(a2);
+                }
                 stars[i] = new StarData
                 {
                     CosAngle = (float)Math.Cos(angle),
@@ -421,6 +432,8 @@ class StarEffect : IClickEffect
                     TwinkleSpeed = 0.8f + (float)(rng.NextDouble() * 0.7f),
                     InitRot = (float)(rng.NextDouble() * Math.PI * 2),
                     RotSpeed = ((rng.Next(2) == 0) ? 1f : -1f) * (80f + (float)(rng.NextDouble() * 120f)),
+                    CosDirs = cosDirs,
+                    SinDirs = sinDirs,
                 };
             }
             anim.EffectData = stars;
@@ -460,7 +473,7 @@ class StarEffect : IClickEffect
 
             _pen.Width = 1.5f * sizeScale;
             _pen.Color = Color.FromArgb((int)(255 * Math.Min(1f, alpha * 1.2f)), baseColor);
-            DrawTinyStar(g, px, py, sz, rot, 4, _pen);
+            DrawStar(g, px, py, sz, _pen, s.CosDirs, s.SinDirs);
 
             _brush.Color = Color.FromArgb(a, Color.White);
             float dotR = sz * 0.15f;
@@ -468,25 +481,24 @@ class StarEffect : IClickEffect
         }
     }
 
-    void DrawTinyStar(Graphics g, float cx, float cy, float radius, float rotation, int points, Pen pen)
+    // 使用预计算方向向量绘制星星，避免每帧 trig 调用
+    static void DrawStar(Graphics g, float cx, float cy, float radius, Pen pen,
+        float[] cosDirs, float[] sinDirs)
     {
         float inner = radius * 0.35f;
-        for (int i = 0; i < points; i++)
+        for (int i = 0; i < StarPoints; i++)
         {
-            float a1 = rotation + i * (float)(Math.PI * 2) / points;
-            float a2 = a1 + (float)Math.PI / points;
-            float x1 = cx + (float)Math.Cos(a1) * radius;
-            float y1 = cy + (float)Math.Sin(a1) * radius;
-            float x2 = cx + (float)Math.Cos(a2) * inner;
-            float y2 = cy + (float)Math.Sin(a2) * inner;
+            int j = (i + 1) % StarPoints;
+            float x1 = cx + cosDirs[i * 2] * radius;
+            float y1 = cy + sinDirs[i * 2] * radius;
+            float x2 = cx + cosDirs[i * 2 + 1] * inner;
+            float y2 = cy + sinDirs[i * 2 + 1] * inner;
             g.DrawLine(pen, x1, y1, x2, y2);
 
-            float a3 = a2;
-            float a4 = rotation + (i + 1) * (float)(Math.PI * 2) / points;
-            float x3 = cx + (float)Math.Cos(a3) * inner;
-            float y3 = cy + (float)Math.Sin(a3) * inner;
-            float x4 = cx + (float)Math.Cos(a4) * radius;
-            float y4 = cy + (float)Math.Sin(a4) * radius;
+            float x3 = x2;
+            float y3 = y2;
+            float x4 = cx + cosDirs[j * 2] * radius;
+            float y4 = cy + sinDirs[j * 2] * radius;
             g.DrawLine(pen, x3, y3, x4, y4);
         }
     }
@@ -555,21 +567,21 @@ class PetalEffect : IClickEffect
         float hl = PetalLength * effectScale * scale * data.SizeVar;
         float hw = PetalWidth * effectScale * scale * data.SizeVar;
 
+        _petalBrush.Color = Color.FromArgb(a, baseColor);
+        GraphicsState state = g.Save();
         for (int i = 0; i < data.PetalCount; i++)
         {
             float angle = baseRotRad + i * angleStep;
             float pcx = cx + (float)Math.Cos(angle) * dist;
             float pcy = cy + (float)Math.Sin(angle) * dist;
 
-            GraphicsState state = g.Save();
+            g.Transform.Reset();
             g.TranslateTransform(pcx, pcy);
             g.RotateTransform(angle * 180f / (float)Math.PI);
 
-            _petalBrush.Color = Color.FromArgb(a, baseColor);
             g.FillEllipse(_petalBrush, -hl, -hw, hl * 2, hw * 2);
-
-            g.Restore(state);
         }
+        g.Restore(state);
     }
 }
 
@@ -635,6 +647,7 @@ class VortexEffect : IClickEffect
 
         float scale = anim.Scale;
         float radius = MaxRadius * scale * Easing.EaseOutQuad(t);
+        float sizeFade = 1f - Easing.EaseInQuad(t); // 所有粒子共享，提到外层
 
         for (int i = 0; i < ParticleCount; i++)
         {
@@ -652,7 +665,7 @@ class VortexEffect : IClickEffect
                 float py = cy + (float)Math.Sin(trailAngle) * trailRadius;
 
                 float trailAlpha = alpha * (1f - trail * 0.25f);
-                float size = baseSize * (1f - trail * 0.15f) * (1f - Easing.EaseInQuad(t));
+                float size = baseSize * (1f - trail * 0.15f) * sizeFade;
 
                 int a = (int)(255 * trailAlpha * bri);
                 _brush.Color = Color.FromArgb(a,
@@ -691,9 +704,6 @@ class FragmentEffect : IClickEffect
     SolidBrush _brush = new SolidBrush(Color.Black);
     Pen _edgePen = new Pen(Color.Black, 1f);
 
-    static readonly float PI = (float)Math.PI;
-    static readonly float Deg2Rad = PI / 180f;
-
     public void Cleanup()
     {
         _brush.Dispose();
@@ -708,7 +718,7 @@ class FragmentEffect : IClickEffect
         ys = new float[verts];
         for (int i = 0; i < verts; i++)
         {
-            float angle = i * PI * 2f / verts + (float)(rng.NextDouble() - 0.5) * 0.6f;
+            float angle = i * Easing.PI * 2f / verts + (float)(rng.NextDouble() - 0.5) * 0.6f;
             float rad = r * (0.65f + (float)(rng.NextDouble()) * 0.45f);
             xs[i] = (float)Math.Cos(angle) * rad;
             ys[i] = (float)Math.Sin(angle) * rad;
@@ -729,7 +739,7 @@ class FragmentEffect : IClickEffect
         {
             var rng = new Random(unchecked(anim.RandomSeed ^ 2718));
 
-            float gravAngle = PI * 0.5f + (float)((rng.NextDouble() - 0.5) * 0.5f);
+            float gravAngle = Easing.PI * 0.5f + (float)((rng.NextDouble() - 0.5) * 0.5f);
 
             float gCos = (float)Math.Cos(gravAngle);
             float gSin = (float)Math.Sin(gravAngle);
@@ -756,7 +766,7 @@ class FragmentEffect : IClickEffect
             // 大碎片：预计算速度分量，避免每帧 Cos/Sin
             for (int i = 0; i < BigFragCount; i++)
             {
-                float angle = (float)(rng.NextDouble() * PI * 2) + (float)(rng.NextDouble() - 0.5) * 0.4f;
+                float angle = (float)(rng.NextDouble() * Easing.PI * 2) + (float)(rng.NextDouble() - 0.5) * 0.4f;
                 float speed = 30f + (float)(rng.NextDouble() * 70f);
                 data.BigVx[i] = (float)Math.Cos(angle) * speed;
                 data.BigVy[i] = (float)Math.Sin(angle) * speed;
@@ -772,7 +782,7 @@ class FragmentEffect : IClickEffect
             // 小碎屑：同样预计算
             for (int i = 0; i < SmallFragCount; i++)
             {
-                float angle = (float)(rng.NextDouble() * PI * 2);
+                float angle = (float)(rng.NextDouble() * Easing.PI * 2);
                 float speed = 50f + (float)(rng.NextDouble() * 80f);
                 data.SmVx[i] = (float)Math.Cos(angle) * speed;
                 data.SmVy[i] = (float)Math.Sin(angle) * speed;
@@ -825,7 +835,7 @@ class FragmentEffect : IClickEffect
             float px = cx + data.BigVx[i] * time * scale + gravOffX;
             float py = cy + data.BigVy[i] * time * scale + gravOffY;
 
-            float rotRad = data.BigRotSpeed[i] * time * Deg2Rad;
+            float rotRad = data.BigRotSpeed[i] * time * (Easing.PI / 180f);
             float sizeFade = fragT < 0.6f ? 1f : 1f - (fragT - 0.6f) / 0.4f;
             float sz = data.BigSize[i] * scale * sizeFade;
             if (sz < 0.5f) continue;
@@ -903,9 +913,9 @@ class MeteorEffect : IClickEffect
         public float P2X, P2Y;  // 终点（点击处）
         // 头部
         public float HeadSize;
-        // 尾部粒子
-        public float[] SparkAngle;
-        public float[] SparkSpeed;
+        // 尾部粒子（预计算 cos/sin，避免每帧 trig）
+        public float[] SparkCos;
+        public float[] SparkSin;
         public float[] SparkSize;
     }
 
@@ -913,8 +923,6 @@ class MeteorEffect : IClickEffect
     Pen _glowPen = new Pen(Color.Black, 4f);
     SolidBrush _headBrush = new SolidBrush(Color.Black);
     SolidBrush _sparkBrush = new SolidBrush(Color.Black);
-
-    static readonly float PI = (float)Math.PI;
 
     public void Cleanup()
     {
@@ -943,11 +951,11 @@ class MeteorEffect : IClickEffect
         if (data == null)
         {
             var rng = new Random(unchecked(anim.RandomSeed ^ 1618));
-            float angle = (float)(rng.NextDouble() * PI * 2);
+            float angle = (float)(rng.NextDouble() * Easing.PI * 2);
             float cosA = (float)Math.Cos(angle);
             float sinA = (float)Math.Sin(angle);
-            float cosP = (float)Math.Cos(angle + PI / 2f);
-            float sinP = (float)Math.Sin(angle + PI / 2f);
+            float cosP = (float)Math.Cos(angle + Easing.PI / 2f);
+            float sinP = (float)Math.Sin(angle + Easing.PI / 2f);
 
             float startX = cosA * StartDist;
             float startY = sinA * StartDist;
@@ -963,14 +971,15 @@ class MeteorEffect : IClickEffect
                 P1X = midX, P1Y = midY,
                 P2X = 0, P2Y = 0,
                 HeadSize = 2.5f + (float)(rng.NextDouble() * 1.5f),
-                SparkAngle = new float[SparkCount],
-                SparkSpeed = new float[SparkCount],
+                SparkCos = new float[SparkCount],
+                SparkSin = new float[SparkCount],
                 SparkSize = new float[SparkCount],
             };
             for (int i = 0; i < SparkCount; i++)
             {
-                data.SparkAngle[i] = (float)(rng.NextDouble() * PI * 2);
-                data.SparkSpeed[i] = 15f + (float)(rng.NextDouble() * 20f);
+                float sparkAngle = (float)(rng.NextDouble() * Easing.PI * 2);
+                data.SparkCos[i] = (float)Math.Cos(sparkAngle);
+                data.SparkSin[i] = (float)Math.Sin(sparkAngle);
                 data.SparkSize[i] = 1f + (float)(rng.NextDouble() * 1.5f);
             }
             anim.EffectData = data;
@@ -1041,8 +1050,8 @@ class MeteorEffect : IClickEffect
 
                 for (int i = 0; i < SparkCount; i++)
                 {
-                    float spx = cx + (float)Math.Cos(data.SparkAngle[i]) * dist;
-                    float spy = cy + (float)Math.Sin(data.SparkAngle[i]) * dist;
+                    float spx = cx + data.SparkCos[i] * dist;
+                    float spy = cy + data.SparkSin[i] * dist;
                     float sz = data.SparkSize[i] * scale * (1f - burstT);
                     if (sz < 0.3f) continue;
 
@@ -1071,33 +1080,16 @@ class FingerEffect : IClickEffect
     const float StartDist = 55f;
     const float EmojiSize = 192f;    // 渲染分辨率（高分辨率保证放大不糊）
     const float DisplayScale = 0.15f; // 显示缩放（与 EmojiSize 配合保持原始显示大小）
-    static readonly float PI = (float)Math.PI;
 
-    class Data : IDisposable
+    class Data
     {
-        public float Angle;
         public float RotationDeg;
-        public Bitmap EmojiBmp;
-
-        public void Dispose()
-        {
-            if (EmojiBmp != null)
-            {
-                EmojiBmp.Dispose();
-                EmojiBmp = null;
-            }
-        }
     }
 
     System.Drawing.Imaging.ImageAttributes _imgAttrs;
-    readonly float[][] _matrixItems = {
-        new float[] {1, 0, 0, 0, 0},
-        new float[] {0, 1, 0, 0, 0},
-        new float[] {0, 0, 1, 0, 0},
-        new float[] {0, 0, 0, 1, 0},
-        new float[] {0, 0, 0, 0, 1},
-    };
+    System.Drawing.Imaging.ColorMatrix _colorMatrix;
     Font _emojiFont;
+    Bitmap _cachedEmojiBmp; // 所有动画共享，避免重复渲染
 
     public FingerEffect()
     {
@@ -1106,27 +1098,29 @@ class FingerEffect : IClickEffect
 
     public void Cleanup()
     {
-        // EffectData 中的 EmojiBmp 由 AnimationState.Dispose() 显式释放
-        if (_imgAttrs != null) _imgAttrs.Dispose();
-        if (_emojiFont != null) _emojiFont.Dispose();
+        if (_cachedEmojiBmp != null) { _cachedEmojiBmp.Dispose(); _cachedEmojiBmp = null; }
+        if (_imgAttrs != null) { _imgAttrs.Dispose(); _imgAttrs = null; }
+        if (_emojiFont != null) { _emojiFont.Dispose(); _emojiFont = null; }
+        _colorMatrix = null;
     }
 
-    Bitmap RenderEmoji(float size)
+    Bitmap GetEmojiBitmap()
     {
+        if (_cachedEmojiBmp != null) return _cachedEmojiBmp;
         string emoji = "👆";
         var measured = TextRenderer.MeasureText(emoji, _emojiFont);
         int w = measured.Width + 4;
         int h = measured.Height + 4;
         if (w < 8) w = 8;
         if (h < 8) h = 8;
-        var bmp = new Bitmap(w, h);
-        using (var g = Graphics.FromImage(bmp))
+        _cachedEmojiBmp = new Bitmap(w, h);
+        using (var g = Graphics.FromImage(_cachedEmojiBmp))
         {
             g.Clear(Color.Transparent);
             TextRenderer.DrawText(g, emoji, _emojiFont, new Point(2, 2),
                 Color.White, Color.Transparent);
         }
-        return bmp;
+        return _cachedEmojiBmp;
     }
 
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
@@ -1140,15 +1134,15 @@ class FingerEffect : IClickEffect
         if (data == null)
         {
             var rng = new Random(unchecked(anim.RandomSeed ^ 5937));
-            float angle = (float)(rng.NextDouble() * PI * 2);
+            float angle = (float)(rng.NextDouble() * Easing.PI * 2);
             data = new Data
             {
-                Angle = angle,
-                RotationDeg = angle * 180f / PI + 90f,
-                EmojiBmp = RenderEmoji(EmojiSize),
+                RotationDeg = angle * 180f / Easing.PI + 90f,
             };
             anim.EffectData = data;
         }
+
+        Bitmap emojiBmp = GetEmojiBitmap();
 
         float t = anim.Age / (float)Duration;
         float moveT = Math.Min(1f, t / 0.6f);
@@ -1158,10 +1152,10 @@ class FingerEffect : IClickEffect
         float alpha = 1f - Easing.EaseInQuad(fadeT);
         if (alpha <= 0f) return;
 
-        float drawW = data.EmojiBmp.Width * scale * DisplayScale;
-        float drawH = data.EmojiBmp.Height * scale * DisplayScale;
+        float drawW = emojiBmp.Width * scale * DisplayScale;
+        float drawH = emojiBmp.Height * scale * DisplayScale;
         float tipOff = drawH * 0.45f;
-        float rotRad = data.RotationDeg * PI / 180f;
+        float rotRad = data.RotationDeg * Easing.PI / 180f;
 
         float tipDirX = (float)Math.Sin(rotRad);
         float tipDirY = -(float)Math.Cos(rotRad);
@@ -1178,15 +1172,15 @@ class FingerEffect : IClickEffect
         float py = startPy + (endPy - startPy) * moveEased;
 
         int a = (int)(255 * alpha);
-        if (a <= 0 || data.EmojiBmp == null) return;
-
-        _matrixItems[0][0] = baseColor.R / 255f;
-        _matrixItems[1][1] = baseColor.G / 255f;
-        _matrixItems[2][2] = baseColor.B / 255f;
-        _matrixItems[3][3] = a / 255f;
+        if (a <= 0 || emojiBmp == null) return;
 
         if (_imgAttrs == null) _imgAttrs = new System.Drawing.Imaging.ImageAttributes();
-        _imgAttrs.SetColorMatrix(new System.Drawing.Imaging.ColorMatrix(_matrixItems),
+        if (_colorMatrix == null) _colorMatrix = new System.Drawing.Imaging.ColorMatrix();
+        _colorMatrix[0, 0] = baseColor.R / 255f;
+        _colorMatrix[1, 1] = baseColor.G / 255f;
+        _colorMatrix[2, 2] = baseColor.B / 255f;
+        _colorMatrix[3, 3] = a / 255f;
+        _imgAttrs.SetColorMatrix(_colorMatrix,
             System.Drawing.Imaging.ColorMatrixFlag.Default,
             System.Drawing.Imaging.ColorAdjustType.Bitmap);
 
@@ -1198,8 +1192,8 @@ class FingerEffect : IClickEffect
         int dw = (int)Math.Round(drawW);
         int dh = (int)Math.Round(drawH);
         var destRect = new Rectangle(-dw / 2, -dh / 2, dw, dh);
-        g.DrawImage(data.EmojiBmp, destRect,
-            0, 0, data.EmojiBmp.Width, data.EmojiBmp.Height,
+        g.DrawImage(emojiBmp, destRect,
+            0, 0, emojiBmp.Width, emojiBmp.Height,
             GraphicsUnit.Pixel, _imgAttrs);
 
         g.Restore(state);
@@ -1236,14 +1230,14 @@ class LightningEffect : IClickEffect
         _branchPen.Dispose();
     }
 
+    // 使用数组替代 List，避免内部扩容和 GC 压力
     static void Subdivide(Random rng, float x1, float y1, float x2, float y2,
                           float offsetX, float offsetY, int levels,
-                          List<float> xs, List<float> ys)
+                          float[] xs, float[] ys, ref int curIdx, int maxIdx)
     {
         if (levels <= 0)
         {
-            xs.Add(x2);
-            ys.Add(y2);
+            if (curIdx < maxIdx) { xs[curIdx] = x2; ys[curIdx] = y2; curIdx++; }
             return;
         }
         float mx = (x1 + x2) * 0.5f;
@@ -1251,8 +1245,8 @@ class LightningEffect : IClickEffect
         float disp = (float)(rng.NextDouble() - 0.5) * 2f;
         mx += offsetX * disp;
         my += offsetY * disp;
-        Subdivide(rng, x1, y1, mx, my, offsetX * 0.5f, offsetY * 0.5f, levels - 1, xs, ys);
-        Subdivide(rng, mx, my, x2, y2, offsetX * 0.5f, offsetY * 0.5f, levels - 1, xs, ys);
+        Subdivide(rng, x1, y1, mx, my, offsetX * 0.5f, offsetY * 0.5f, levels - 1, xs, ys, ref curIdx, maxIdx);
+        Subdivide(rng, mx, my, x2, y2, offsetX * 0.5f, offsetY * 0.5f, levels - 1, xs, ys, ref curIdx, maxIdx);
     }
 
     public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
@@ -1277,16 +1271,16 @@ class LightningEffect : IClickEffect
 
             // 主干：分形细分生成锯齿路径
             int mainCount = 1 << SubdivideLevels; // 8 段
-            var mainXs = new List<float>(mainCount + 1);
-            var mainYs = new List<float>(mainCount + 1);
-            mainXs.Add(cosA * StartDist);
-            mainYs.Add(sinA * StartDist);
+            int mainTotal = mainCount + 1;
+            data.MainX = new float[mainTotal];
+            data.MainY = new float[mainTotal];
+            data.MainX[0] = cosA * StartDist;
+            data.MainY[0] = sinA * StartDist;
+            int mainIdx = 1;
             Subdivide(rng,
                 cosA * StartDist, sinA * StartDist, 0f, 0f,
                 cosP * OffsetBase, sinP * OffsetBase,
-                SubdivideLevels, mainXs, mainYs);
-            data.MainX = mainXs.ToArray();
-            data.MainY = mainYs.ToArray();
+                SubdivideLevels, data.MainX, data.MainY, ref mainIdx, mainTotal);
 
             // 分支：2-4 条，每条也用分形细分
             int mainSegCount = data.MainX.Length - 1;
@@ -1310,18 +1304,18 @@ class LightningEffect : IClickEffect
                 float branchLen = StartDist * (0.25f + (float)(rng.NextDouble() * 0.25f));
                 int branchLevels = 2 + rng.Next(2); // 4 或 8 段
 
-                var bxList = new List<float>();
-                var byList = new List<float>();
-                bxList.Add(data.MainX[startIdx]);
-                byList.Add(data.MainY[startIdx]);
+                int branchTotal = (1 << branchLevels) + 1;
+                data.BranchX[b] = new float[branchTotal];
+                data.BranchY[b] = new float[branchTotal];
+                data.BranchX[b][0] = data.MainX[startIdx];
+                data.BranchY[b][0] = data.MainY[startIdx];
+                int bIdx = 1;
                 Subdivide(rng,
                     data.MainX[startIdx], data.MainY[startIdx],
                     data.MainX[startIdx] + bCos * branchLen,
                     data.MainY[startIdx] + bSin * branchLen,
                     bCosP * OffsetBase * 0.5f, bSinP * OffsetBase * 0.5f,
-                    branchLevels, bxList, byList);
-                data.BranchX[b] = bxList.ToArray();
-                data.BranchY[b] = byList.ToArray();
+                    branchLevels, data.BranchX[b], data.BranchY[b], ref bIdx, branchTotal);
             }
 
             anim.EffectData = data;

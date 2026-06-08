@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Text;
@@ -85,8 +86,9 @@ static class ConfigManager
             var json = File.ReadAllText(ConfigPath, Encoding.UTF8);
             return ParseConfig(json);
         }
-        catch
+        catch (Exception ex)
         {
+            Debug.WriteLine("[ClickFX] Load config failed: " + ex.Message);
             return new AppConfig();
         }
     }
@@ -97,7 +99,7 @@ static class ConfigManager
         {
             File.WriteAllText(ConfigPath, SerializeConfig(config), Encoding.UTF8);
         }
-        catch { }
+        catch (Exception ex) { Debug.WriteLine("[ClickFX] Save config failed: " + ex.Message); }
     }
 
     const string AutoStartKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -112,7 +114,7 @@ static class ConfigManager
                 return key.GetValue(AppName) != null;
             }
         }
-        catch { return false; }
+        catch (Exception ex) { Debug.WriteLine("[ClickFX] GetAutoStart failed: " + ex.Message); return false; }
     }
 
     public static void SetAutoStart(bool enable)
@@ -132,7 +134,7 @@ static class ConfigManager
                 }
             }
         }
-        catch { }
+        catch (Exception ex) { Debug.WriteLine("[ClickFX] SetAutoStart failed: " + ex.Message); }
     }
 
     // ==================== 手动 JSON 序列化 ====================
@@ -150,7 +152,7 @@ static class ConfigManager
             + "  \"AutoStart\": " + (c.AutoStart ? "true" : "false") + ",\n"
             + "  \"HotkeyModifiers\": " + c.HotkeyModifiers + ",\n"
             + "  \"HotkeyKey\": " + c.HotkeyKey + ",\n"
-            + "  \"EffectScale\": " + c.EffectScale.ToString("0.0",
+            + "  \"EffectScale\": " + c.EffectScale.ToString("0.0##",
                 System.Globalization.CultureInfo.InvariantCulture) + ",\n"
             + "  \"TriggerMode\": " + Quote(c.TriggerMode ?? "Up") + "\n"
             + "}";
@@ -497,7 +499,7 @@ class ConfigForm : Form
         _hotkeySetBtn.Click += (s, e) => SetHotkey();
         Controls.Add(_hotkeySetBtn);
         _hotkeyClearBtn = new Button { Text = "清除", Location = new Point(286, y - 1), Size = new Size(46, 24) };
-        _hotkeyClearBtn.Click += (s, e) => { _hotkeyModifiers = 0; _hotkeyKey = 0; _hotkeyDisplayLabel.Text = ""; };
+        _hotkeyClearBtn.Click += (s, e) => { _hotkeyModifiers = 0; _hotkeyKey = 0; _hotkeyDisplayLabel.Text = ""; NotifyPreview(); };
         Controls.Add(_hotkeyClearBtn);
         y += 30;
 

@@ -198,7 +198,6 @@ class OverlayManager : IDisposable
     readonly List<OverlayForm> _overlays = new List<OverlayForm>();
     readonly List<AnimationState> _animations = new List<AnimationState>();
     readonly Timer _timer;
-    bool _hadAnimations;
     IntPtr _hookId = IntPtr.Zero;
     LowLevelMouseProc _hookProc;
     NotifyIcon _trayIcon;
@@ -323,7 +322,6 @@ class OverlayManager : IDisposable
 
     void OnTimerTick(object sender, EventArgs e)
     {
-        bool hasAnimations;
         lock (_animations)
         {
             for (int i = _animations.Count - 1; i >= 0; i--)
@@ -345,15 +343,25 @@ class OverlayManager : IDisposable
                 _animations.RemoveRange(0, overflow);
             }
 
-            hasAnimations = _animations.Count > 0;
-        }
-
-        if (hasAnimations || _hadAnimations)
-        {
+            // 只 invalidate 有动画或上一帧有动画的屏幕，避免无动画屏幕做无用渲染
+            bool hasAnimations = _animations.Count > 0;
             for (int i = 0; i < _overlays.Count; i++)
-                _overlays[i].Invalidate();
+            {
+                if (_overlays[i]._hadAnimations || (hasAnimations && HasAnimationsOnScreenLocked(_overlays[i].Bounds)))
+                    _overlays[i].Invalidate();
+            }
         }
-        _hadAnimations = hasAnimations;
+    }
+
+    // 调用方已持有 _animations 锁时使用此方法，避免重入锁开销
+    bool HasAnimationsOnScreenLocked(Rectangle bounds)
+    {
+        for (int i = 0; i < _animations.Count; i++)
+        {
+            if (bounds.Contains(_animations[i].Position))
+                return true;
+        }
+        return false;
     }
 
     IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -378,13 +386,13 @@ class OverlayManager : IDisposable
     }
 
     static readonly Random _globalRng = new Random();
-    DateTime _lastClickTime = DateTime.MinValue;
+    int _lastClickTick = int.MinValue;
 
     void AddAnimation(Point pos, MouseButtons button)
     {
-        var now = DateTime.UtcNow;
-        if ((now - _lastClickTime).TotalMilliseconds < 50) return;
-        _lastClickTime = now;
+        int now = Environment.TickCount;
+        if ((now - _lastClickTick & int.MaxValue) < 50) return;
+        _lastClickTick = now;
 
         var effectName = (button == MouseButtons.Left)
             ? Config.LeftEffect
@@ -401,7 +409,7 @@ class OverlayManager : IDisposable
             _animations.Add(new AnimationState
             {
                 Position = pos, Age = 0, Button = button, Duration = duration,
-                RandomSeed = seed, EffectName = effect.Name, CachedEffect = effect,
+                RandomSeed = seed, CachedEffect = effect,
                 Scale = Config.EffectScale
             });
         }
@@ -409,6 +417,7 @@ class OverlayManager : IDisposable
 
     // 注意：返回的列表引用是共享的，调用方必须立即使用，不能跨帧持有。
     // 安全前提：WinForms 单线程，所有 OnPaint 在同一线程顺序执行。
+    // 禁止在非 UI 线程访问此列表——若未来添加异步功能，需改为返回副本。
     readonly List<AnimationState> _screenAnims = new List<AnimationState>();
 
     public List<AnimationState> GetAnimationsForScreen(Rectangle bounds)
@@ -443,16 +452,20 @@ class OverlayManager : IDisposable
         _timer.Stop();
         _timer.Dispose();
         // 释放残留动画中的非托管资源（如 FingerEffect 的 Bitmap）
-        for (int i = _animations.Count - 1; i >= 0; i--)
+        lock (_animations)
         {
-            try { _animations[i].Dispose(); } catch { }
+            for (int i = _animations.Count - 1; i >= 0; i--)
+            {
+                try { _animations[i].Dispose(); } catch { }
+            }
+            _animations.Clear();
         }
-        _animations.Clear();
         for (int i = _overlays.Count - 1; i >= 0; i--)
         {
             try
             {
                 _overlays[i].ReleaseDib();
+                _overlays[i].ReleaseScreenDc();
                 _overlays[i].Dispose();
             }
             catch { }
@@ -474,10 +487,12 @@ class OverlayForm : Form
     public OverlayManager Manager { get; set; }
 
     // 缓存 DIB / DC / Graphics，避免每帧分配
-    IntPtr _cachedHBitmap, _cachedHdcMem, _cachedHdcScreen, _cachedOldObj, _cachedPBits;
+    IntPtr _cachedHBitmap, _cachedHdcMem, _cachedOldObj, _cachedPBits;
     Graphics _cachedGraphics;
     int _cachedW, _cachedH;
+    IntPtr _cachedHdcScreen; // 屏幕 DC，生命周期内不变，避免每帧重新获取
     Rectangle _prevAnimArea; // 上一帧的动效区域（非脏矩形，避免无限增长）
+    internal bool _hadAnimations; // 上一帧是否有动画（用于按需 Invalidate）
 
     void EnsureDib(int w, int h)
     {
@@ -494,7 +509,8 @@ class OverlayForm : Form
 
         _cachedHBitmap = NativeMethods.CreateDIBSection(IntPtr.Zero, ref bih, 0,
             out _cachedPBits, IntPtr.Zero, 0);
-        _cachedHdcScreen = NativeMethods.GetDC(IntPtr.Zero);
+        if (_cachedHdcScreen == IntPtr.Zero)
+            _cachedHdcScreen = NativeMethods.GetDC(IntPtr.Zero);
         _cachedHdcMem = NativeMethods.CreateCompatibleDC(_cachedHdcScreen);
         _cachedOldObj = NativeMethods.SelectObject(_cachedHdcMem, _cachedHBitmap);
         _cachedGraphics = Graphics.FromHdc(_cachedHdcMem);
@@ -510,11 +526,20 @@ class OverlayForm : Form
         if (_cachedGraphics != null) { _cachedGraphics.Dispose(); _cachedGraphics = null; }
         NativeMethods.SelectObject(_cachedHdcMem, _cachedOldObj);
         NativeMethods.DeleteDC(_cachedHdcMem);
-        NativeMethods.ReleaseDC(IntPtr.Zero, _cachedHdcScreen);
         NativeMethods.DeleteObject(_cachedHBitmap);
         _cachedHBitmap = IntPtr.Zero;
         _cachedW = 0;
         _cachedH = 0;
+    }
+
+    // 释放缓存的屏幕 DC（仅在 Overlay 销毁时调用）
+    public void ReleaseScreenDc()
+    {
+        if (_cachedHdcScreen != IntPtr.Zero)
+        {
+            NativeMethods.ReleaseDC(IntPtr.Zero, _cachedHdcScreen);
+            _cachedHdcScreen = IntPtr.Zero;
+        }
     }
 
     public OverlayForm()
@@ -535,15 +560,6 @@ class OverlayForm : Form
             cp.Style |= WinConsts.WS_POPUP;
             return cp;
         }
-    }
-
-    protected override void OnShown(EventArgs e)
-    {
-        base.OnShown(e);
-        int ex = NativeMethods.GetWindowLong(Handle, WinConsts.GWL_EXSTYLE);
-        NativeMethods.SetWindowLong(Handle, WinConsts.GWL_EXSTYLE,
-            ex | WinConsts.WS_EX_LAYERED | WinConsts.WS_EX_TRANSPARENT
-            | WinConsts.WS_EX_TOPMOST | WinConsts.WS_EX_TOOLWINDOW);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -579,9 +595,23 @@ class OverlayForm : Form
         if (!dirty.IsEmpty)
         {
             int stride = w * 4;
-            IntPtr start = _cachedPBits + dirty.Y * stride;
-            uint bytes = (uint)(dirty.Height * stride);
-            NativeMethods.RtlZeroMemory(start, bytes);
+            // 当脏矩形宽度远小于屏幕宽度时，逐行清除避免清零不必要的像素
+            if (dirty.Width < w * 3 / 4)
+            {
+                int rowBytes = dirty.Width * 4;
+                int rowStart = dirty.X * 4;
+                for (int row = 0; row < dirty.Height; row++)
+                {
+                    IntPtr ptr = _cachedPBits + (dirty.Y + row) * stride + rowStart;
+                    NativeMethods.RtlZeroMemory(ptr, (uint)rowBytes);
+                }
+            }
+            else
+            {
+                IntPtr start = _cachedPBits + dirty.Y * stride;
+                uint bytes = (uint)(dirty.Height * stride);
+                NativeMethods.RtlZeroMemory(start, bytes);
+            }
         }
 
         if (anims.Count > 0)
@@ -598,6 +628,7 @@ class OverlayForm : Form
         }
 
         _prevAnimArea = curAnimArea;
+        _hadAnimations = anims.Count > 0;
 
         var pptDst = new POINT { X = Left, Y = Top };
         var size = new SIZE { cx = w, cy = h };
