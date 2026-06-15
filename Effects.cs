@@ -923,6 +923,9 @@ class MeteorEffect : IClickEffect
         public float[] SparkCos;
         public float[] SparkSin;
         public float[] SparkSize;
+        // 拖尾坐标缓存（每动画分配一次，避免每帧 GC）
+        public float[] TrailPx;
+        public float[] TrailPy;
     }
 
     Pen _trailPen = new Pen(Color.Black, 2f);
@@ -980,6 +983,8 @@ class MeteorEffect : IClickEffect
                 SparkCos = new float[SparkCount],
                 SparkSin = new float[SparkCount],
                 SparkSize = new float[SparkCount],
+                TrailPx = new float[TrailSegments + 1],
+                TrailPy = new float[TrailSegments + 1],
             };
             for (int i = 0; i < SparkCount; i++)
             {
@@ -1005,8 +1010,8 @@ class MeteorEffect : IClickEffect
 
         // ---- 多段渐隐拖尾（预计算 Bezier 点，避免每段重复求值） ----
         float segStep = TrailDuration / TrailSegments;
-        float[] trailPx = new float[TrailSegments + 1];
-        float[] trailPy = new float[TrailSegments + 1];
+        float[] trailPx = data.TrailPx;
+        float[] trailPy = data.TrailPy;
         for (int i = 0; i <= TrailSegments; i++)
         {
             float st = moveT - i * segStep;

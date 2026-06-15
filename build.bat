@@ -18,3 +18,4 @@ start "" "%~dp0ClickFX.exe"
 
 echo.
 echo Build OK - ClickFX is running
+exit 0
