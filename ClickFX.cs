@@ -67,6 +67,10 @@ static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool DestroyIcon(IntPtr hIcon);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vk);
 
@@ -208,10 +212,17 @@ class OverlayManager : IDisposable
     volatile bool _enabled = true;
     bool _settingsOpen;
 
+    // 钩子看门狗：检测系统静默卸载钩子后自动重装
+    int _lastHookTick;     // 钩子最后一次回调的时刻
+    int _watchdogAccumMs;  // 节流累加器
+    POINT _lastCursorPos;  // 上次看门狗检查时的光标位置
+
     public AppConfig Config { get; private set; }
 
     const int TICK_MS = 16;
     const int MAX_ANIMATIONS = 200;
+    const int WATCHDOG_INTERVAL_MS = 2000;    // 看门狗检查周期
+    const int HOOK_DEAD_THRESHOLD_MS = 2500;  // 鼠标在动却超过此时长无回调 => 判定钩子已死
 
     public OverlayManager()
     {
@@ -267,12 +278,8 @@ class OverlayManager : IDisposable
         ApplyHotkey();
 
         _hookProc = HookCallback;
-        using (var process = Process.GetCurrentProcess())
-        using (var module = process.MainModule)
-        {
-            _hookId = NativeMethods.SetWindowsHookEx(WinConsts.WH_MOUSE_LL, _hookProc,
-                NativeMethods.GetModuleHandle(module.ModuleName), 0);
-        }
+        InstallHook();
+        NativeMethods.GetCursorPos(out _lastCursorPos);
 
         _timer.Start();
     }
@@ -330,6 +337,8 @@ class OverlayManager : IDisposable
 
     void OnTimerTick(object sender, EventArgs e)
     {
+        CheckHookAlive();
+
         lock (_animations)
         {
             for (int i = _animations.Count - 1; i >= 0; i--)
@@ -372,25 +381,73 @@ class OverlayManager : IDisposable
         return false;
     }
 
+    void InstallHook()
+    {
+        using (var process = Process.GetCurrentProcess())
+        using (var module = process.MainModule)
+        {
+            _hookId = NativeMethods.SetWindowsHookEx(WinConsts.WH_MOUSE_LL, _hookProc,
+                NativeMethods.GetModuleHandle(module.ModuleName), 0);
+        }
+        _lastHookTick = Environment.TickCount;
+    }
+
+    void ReinstallHook()
+    {
+        if (_hookId != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_hookId);
+            _hookId = IntPtr.Zero;
+        }
+        InstallHook();
+    }
+
+    // 看门狗：鼠标确实在移动（光标坐标变化），但钩子长时间无回调，
+    // 说明系统已静默卸载了低级钩子 —— 自动重装，免去手动"重启"。
+    // 用光标位移而非 GetLastInputInfo 判断，避免纯键盘操作造成误判。
+    void CheckHookAlive()
+    {
+        _watchdogAccumMs += TICK_MS;
+        if (_watchdogAccumMs < WATCHDOG_INTERVAL_MS) return;
+        _watchdogAccumMs = 0;
+
+        if (_hookId == IntPtr.Zero) return;
+
+        POINT cur;
+        if (!NativeMethods.GetCursorPos(out cur)) return;
+        bool mouseMoved = cur.X != _lastCursorPos.X || cur.Y != _lastCursorPos.Y;
+        _lastCursorPos = cur;
+        if (!mouseMoved) return; // 鼠标没动，无法判断钩子死活，跳过
+
+        // 鼠标动了，正常情况下钩子应在毫秒级回调过；超过阈值未回调即判定已死
+        if (unchecked(Environment.TickCount - _lastHookTick) > HOOK_DEAD_THRESHOLD_MS)
+            ReinstallHook();
+    }
+
     IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && _enabled)
+        if (nCode >= 0)
         {
-            var info = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(
-                lParam, typeof(MSLLHOOKSTRUCT));
-            int msg = (int)wParam;
-            var pos = new Point(info.pt.X, info.pt.Y);
+            // 无论启用与否都更新时间戳，使暂停期间看门狗仍认为钩子存活
+            _lastHookTick = Environment.TickCount;
+            if (_enabled)
+            {
+                var info = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(
+                    lParam, typeof(MSLLHOOKSTRUCT));
+                int msg = (int)wParam;
+                var pos = new Point(info.pt.X, info.pt.Y);
 
-            // 取快照，避免跨线程读取 Config 时引用和字段不一致
-            var cfg = Config;
-            bool triggerDown = cfg.TriggerMode == "Down";
-            int leftMsg = triggerDown ? WinConsts.WM_LBUTTONDOWN : WinConsts.WM_LBUTTONUP;
-            int rightMsg = triggerDown ? WinConsts.WM_RBUTTONDOWN : WinConsts.WM_RBUTTONUP;
+                // 取快照，避免跨线程读取 Config 时引用和字段不一致
+                var cfg = Config;
+                bool triggerDown = cfg.TriggerMode == "Down";
+                int leftMsg = triggerDown ? WinConsts.WM_LBUTTONDOWN : WinConsts.WM_LBUTTONUP;
+                int rightMsg = triggerDown ? WinConsts.WM_RBUTTONDOWN : WinConsts.WM_RBUTTONUP;
 
-            if (msg == leftMsg)
-                AddAnimation(pos, MouseButtons.Left, cfg);
-            else if (msg == rightMsg)
-                AddAnimation(pos, MouseButtons.Right, cfg);
+                if (msg == leftMsg)
+                    AddAnimation(pos, MouseButtons.Left, cfg);
+                else if (msg == rightMsg)
+                    AddAnimation(pos, MouseButtons.Right, cfg);
+            }
         }
         return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }

@@ -105,18 +105,6 @@ static class ConfigManager
     const string AutoStartKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     const string AppName = "ClickFX";
 
-    public static bool GetAutoStart()
-    {
-        try
-        {
-            using (var key = Registry.CurrentUser.OpenSubKey(AutoStartKey, false))
-            {
-                return key.GetValue(AppName) != null;
-            }
-        }
-        catch (Exception ex) { Debug.WriteLine("[ClickFX] GetAutoStart failed: " + ex.Message); return false; }
-    }
-
     public static void SetAutoStart(bool enable)
     {
         try
