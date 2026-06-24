@@ -66,6 +66,10 @@ static class Program
         EffectRegistry.Register(new MeteorEffect());
         EffectRegistry.Register(new LightningEffect());
         EffectRegistry.Register(new FingerEffect());
+        EffectRegistry.Register(new HeartEffect());
+        EffectRegistry.Register(new SnowflakeEffect());
+        EffectRegistry.Register(new ConfettiEffect());
+        EffectRegistry.Register(new FireflyEffect());
 
         // 同步开机自启动注册表
         var config = ConfigManager.Load();

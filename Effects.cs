@@ -110,6 +110,13 @@ static class Easing
     {
         return 1f - (1f - t) * (1f - t);
     }
+
+    public static float EaseInOutCubic(float t)
+    {
+        if (t < 0.5f) return 4f * t * t * t;
+        float u = -2f * t + 2f;
+        return 1f - u * u * u * 0.5f;
+    }
 }
 
 // 各效果的随机参数通过 EffectData 每动画只计算一次（见 AnimationState.EffectData），
@@ -367,10 +374,10 @@ class StarEffect : IClickEffect
 
     const int StarCount = 7;
     const int StarPoints = 4;
-    const float MaxDist = 28f;
+    const float MaxDist = 36f;
     const float BaseSize = 2.8f;
     const float SizeJitter = 1.8f;
-    const float CurveStrength = 8f;
+    const float CurveStrength = 6f;
 
     class StarData
     {
@@ -448,11 +455,12 @@ class StarEffect : IClickEffect
             if (localT <= 0f || localT >= 1f) continue;
 
             float dist = s.Dist * anim.Scale;
-            float moveT = Easing.EaseOutQuad(Math.Min(1f, localT * 2.5f));
-            float drift = Easing.EaseInQuad(Math.Max(0f, localT - 0.4f) / 0.6f) * dist * 0.4f;
-            float r = dist * moveT + drift;
-
-            float curveAmount = s.Curve * Easing.EaseInQuad(localT);
+            // 全程单段平滑减速地向外飞出，单调不回头(去掉中途停顿再加速的突兀)
+            float moveT = Easing.EaseOutQuad(localT);
+            float r = dist * moveT;
+            // 侧向弧线用 smoothstep(两端速度为 0)，与径向不同曲线 → 平滑弧形且末端不甩动
+            float curveT = localT * localT * (3f - 2f * localT);
+            float curveAmount = s.Curve * anim.Scale * curveT;
 
             float px = cx + s.CosAngle * r + s.CosPerp * curveAmount;
             float py = cy + s.SinAngle * r + s.SinPerp * curveAmount;
@@ -1231,17 +1239,34 @@ class LightningEffect : IClickEffect
         public int BranchCount;
         public int[] BranchStart;
         public float[][] BranchX, BranchY;
+        public float[] SparkCos, SparkSin, SparkLen; // 击中点向外迸射的火花
     }
 
+    Pen _contourPen = new Pen(Color.Black, 7f); // 深色描边，浅色背景下提供对比
+    GraphicsPath _contourPath = new GraphicsPath(); // 整条一次性描边，避免折点叠暗成点
     Pen _glowPen = new Pen(Color.Black, 3f);
     Pen _corePen = new Pen(Color.Black, 1.5f);
     Pen _branchPen = new Pen(Color.Black, 1f);
+    SolidBrush _flashBrush = new SolidBrush(Color.Black);
+
+    public LightningEffect()
+    {
+        // 圆角端点/连接，避免逐段 DrawLine 在折点处留下缺口，使闪电连成一条流光
+        _contourPen.StartCap = _contourPen.EndCap = LineCap.Round;
+        _glowPen.StartCap = _glowPen.EndCap = LineCap.Round;
+        _corePen.StartCap = _corePen.EndCap = LineCap.Round;
+        _branchPen.StartCap = _branchPen.EndCap = LineCap.Round;
+        _contourPen.LineJoin = _glowPen.LineJoin = _corePen.LineJoin = _branchPen.LineJoin = LineJoin.Round;
+    }
 
     public void Cleanup()
     {
+        _contourPen.Dispose();
+        _contourPath.Dispose();
         _glowPen.Dispose();
         _corePen.Dispose();
         _branchPen.Dispose();
+        _flashBrush.Dispose();
     }
 
     // 使用数组替代 List，避免内部扩容和 GC 压力
@@ -1332,6 +1357,19 @@ class LightningEffect : IClickEffect
                     branchLevels, data.BranchX[b], data.BranchY[b], ref bIdx, branchTotal);
             }
 
+            // 击中点火花：随机方向 + 长度，落地瞬间向外迸射
+            int sparkN = 6 + rng.Next(4); // 6~9 条
+            data.SparkCos = new float[sparkN];
+            data.SparkSin = new float[sparkN];
+            data.SparkLen = new float[sparkN];
+            for (int s = 0; s < sparkN; s++)
+            {
+                float sa = (float)(rng.NextDouble() * Math.PI * 2);
+                data.SparkCos[s] = (float)Math.Cos(sa);
+                data.SparkSin[s] = (float)Math.Sin(sa);
+                data.SparkLen[s] = 0.6f + (float)(rng.NextDouble() * 0.8f);
+            }
+
             anim.EffectData = data;
         }
 
@@ -1345,19 +1383,27 @@ class LightningEffect : IClickEffect
 
         int segCount = data.MainX.Length - 1;
 
-        // 击中后闪烁：35%~55% 区间做两次明暗脉冲
+        // 击中后多次回击闪烁：30%~65% 区间做逐渐衰减的强弱脉冲
         float flicker = 1f;
-        if (t >= 0.35f && t < 0.55f)
+        if (t >= 0.30f && t < 0.65f)
         {
-            float ft = (t - 0.35f) / 0.2f;
-            float wave = (float)Math.Sin(ft * Math.PI * 2f);
-            flicker = 1f + 0.6f * wave;
+            float ft = (t - 0.30f) / 0.35f;
+            float wave = (float)Math.Sin(ft * Math.PI * 6f); // 3 次回击
+            flicker = 1f + 0.55f * wave * (1f - ft);          // 越往后越弱
+            if (flicker < 0.45f) flicker = 0.45f;
         }
+
+        // 炽热核心：基色向白偏移，外圈彩色辉光、内芯近白，更像真实电弧
+        int hotR = (int)(baseColor.R + (255 - baseColor.R) * 0.72f);
+        int hotG = (int)(baseColor.G + (255 - baseColor.G) * 0.72f);
+        int hotB = (int)(baseColor.B + (255 - baseColor.B) * 0.72f);
 
         int a = (int)(255 * alpha * flicker);
         int glowA = (int)(80 * alpha * flicker);
+        int contourA = (int)(120 * alpha);   // 深色描边不随回击闪烁，保持稳定对比
         if (a > 255) a = 255;
         if (glowA > 255) glowA = 255;
+        if (contourA > 255) contourA = 255;
 
         // 计算当前闪电尖端位置（用于末端闪光）
         float tipX = 0, tipY = 0;
@@ -1372,6 +1418,33 @@ class LightningEffect : IClickEffect
             tipX = tx1 + (tx2 - tx1) * segFrac;
             tipY = ty1 + (ty2 - ty1) * segFrac;
         }
+
+        // 深色描边：整条主干一次性 stroke（单条路径，折点不会因半透明叠加而变暗成点）
+        _contourPath.Reset();
+        {
+            float pmx = cx + data.MainX[0] * scale;
+            float pmy = cy + data.MainY[0] * scale;
+            for (int i = 0; i < segCount; i++)
+            {
+                float segFar = (float)i / segCount;
+                if (segFar >= revealEased) break;
+                float segNear = (float)(i + 1) / segCount;
+                float nx = cx + data.MainX[i + 1] * scale;
+                float ny = cy + data.MainY[i + 1] * scale;
+                float ex = nx, ey = ny;
+                if (segNear > revealEased)
+                {
+                    float sp = (revealEased - segFar) / (segNear - segFar);
+                    ex = pmx + (nx - pmx) * sp;
+                    ey = pmy + (ny - pmy) * sp;
+                }
+                _contourPath.AddLine(pmx, pmy, ex, ey);
+                pmx = nx; pmy = ny;
+            }
+        }
+        _contourPen.Color = Color.FromArgb(contourA, 18, 18, 26);
+        _contourPen.Width = 2.3f * scale;
+        g.DrawPath(_contourPen, _contourPath);
 
         // 主干辉光 + 核心（逐段显现，远端粗近端细）
         for (int i = 0; i < segCount; i++)
@@ -1398,7 +1471,7 @@ class LightningEffect : IClickEffect
 
             _glowPen.Color = Color.FromArgb(glowA, baseColor);
             _glowPen.Width = glowW;
-            _corePen.Color = Color.FromArgb(a, baseColor);
+            _corePen.Color = Color.FromArgb(a, hotR, hotG, hotB);
             _corePen.Width = coreW;
 
             g.DrawLine(_glowPen, x1, y1, x2, y2);
@@ -1460,6 +1533,675 @@ class LightningEffect : IClickEffect
             float cs = 3f * scale * tipFade;
             g.DrawLine(_glowPen, tipX - cs, tipY, tipX + cs, tipY);
             g.DrawLine(_glowPen, tipX, tipY - cs, tipX, tipY + cs);
+        }
+
+        // 击中点：落地瞬间迸射火花 + 一个短促的高亮命中点
+        if (t >= 0.26f && t < 0.60f)
+        {
+            float it = (t - 0.26f) / 0.34f;        // 0~1 迸射进度
+            float spread = Easing.EaseOutQuad(it);
+            float fade = 1f - it;
+            float dist = (4f + 13f * spread) * scale;
+
+            // 火花从命中点向外飞射、逐渐拉长变细并淡出
+            float sw = (0.4f + 1.3f * fade) * scale;
+            int sa = (int)(235 * alpha * fade * flicker);
+            if (sa > 255) sa = 255;
+            for (int s = 0; s < data.SparkLen.Length; s++)
+            {
+                float reach = dist * data.SparkLen[s];
+                float x1 = cx + data.SparkCos[s] * reach * 0.5f;
+                float y1 = cy + data.SparkSin[s] * reach * 0.5f;
+                float x2 = cx + data.SparkCos[s] * reach;
+                float y2 = cy + data.SparkSin[s] * reach;
+                _corePen.Color = Color.FromArgb(sa, hotR, hotG, hotB);
+                _corePen.Width = sw;
+                g.DrawLine(_corePen, x1, y1, x2, y2);
+            }
+
+            // 命中点的高亮，极快收缩消失（锚定“击中这里”）
+            float hit = (1f - Math.Min(1f, it / 0.4f));
+            if (hit > 0.01f)
+            {
+                float r = (4.5f * hit + 1f) * scale;
+                int ha = (int)(220 * alpha * hit * flicker);
+                if (ha > 255) ha = 255;
+                _flashBrush.Color = Color.FromArgb(ha, hotR, hotG, hotB);
+                g.FillEllipse(_flashBrush, cx - r, cy - r, r * 2f, r * 2f);
+            }
+        }
+    }
+}
+
+// ==================== 效果：爱心 ====================
+
+class HeartEffect : IClickEffect
+{
+    public string Name { get { return "爱心"; } }
+    public int Duration { get { return 600; } }
+
+    const int Segments = 24;       // 爱心多边形采样点数
+    const int MinHearts = 3;       // 3~4 个(减少重叠)
+    const float MaxDist = 24f;     // 向外弹出距离(加大，让爱心分得更开)
+    const float RiseDist = 16f;    // 额外上浮距离
+    const float BaseSize = 7f;     // 爱心基础半径
+    const float SizeJitter = 2f;
+
+    // 单位爱心多边形(以原点为中心，尖端朝下，外接半径约 1)，静态预计算一次
+    static readonly float[] HeartX = new float[Segments];
+    static readonly float[] HeartY = new float[Segments];
+
+    static HeartEffect()
+    {
+        var mx = new float[Segments];
+        var my = new float[Segments];
+        float maxExt = 0f;
+        for (int i = 0; i < Segments; i++)
+        {
+            double a = i * (Math.PI * 2) / Segments;
+            double x = 16.0 * Math.Pow(Math.Sin(a), 3);
+            double y = 13.0 * Math.Cos(a) - 5.0 * Math.Cos(2 * a)
+                     - 2.0 * Math.Cos(3 * a) - Math.Cos(4 * a);
+            mx[i] = (float)x;
+            my[i] = -(float)y; // 数学 y 向上 → 屏幕 y 向下，使尖端朝下
+            float ext = (float)Math.Sqrt(x * x + y * y);
+            if (ext > maxExt) maxExt = ext;
+        }
+        for (int i = 0; i < Segments; i++)
+        {
+            HeartX[i] = mx[i] / maxExt;
+            HeartY[i] = my[i] / maxExt;
+        }
+    }
+
+    class Particle
+    {
+        public float DirX, DirY;   // 弹出方向(偏上)
+        public float Dist;         // 弹出距离系数
+        public float Size;
+        public float Bri;
+        public float InitRot;      // 初始倾斜(弧度)
+        public float WobbleAmp;    // 摇摆幅度
+        public float WobbleSpeed;
+        public float Delay;
+    }
+
+    class Data { public Particle[] Hearts; }
+
+    SolidBrush _brush = new SolidBrush(Color.Black);
+    Pen _edgePen = new Pen(Color.Black, 1f);
+    readonly PointF[] _pts = new PointF[Segments]; // 复用顶点缓冲(仅 UI 线程，串行)
+
+    public void Cleanup()
+    {
+        _brush.Dispose();
+        _edgePen.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float t = anim.Age / (float)Duration;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 0x48454152));
+            int count = MinHearts + rng.Next(2); // 3~4
+            var hearts = new Particle[count];
+            // 方向均匀分布在上方扇区 [-165°, -15°]，每个爱心占一个扇格内随机，
+            // 避免方向扎堆导致重叠(屏幕 y 向下，向上即 -y)
+            const double arcStartDeg = -165.0;
+            const double arcSpanDeg = 150.0;
+            double stepDeg = arcSpanDeg / count;
+            for (int i = 0; i < count; i++)
+            {
+                double deg = arcStartDeg + stepDeg * (i + 0.15 + rng.NextDouble() * 0.7);
+                double ang = deg * Math.PI / 180.0;
+                hearts[i] = new Particle
+                {
+                    DirX = (float)Math.Cos(ang),
+                    DirY = (float)Math.Sin(ang),
+                    Dist = 0.75f + (float)(rng.NextDouble() * 0.5f),
+                    Size = BaseSize + (float)(rng.NextDouble() * SizeJitter),
+                    Bri = 0.8f + (float)(rng.NextDouble() * 0.2f),
+                    InitRot = (float)((rng.NextDouble() - 0.5) * 0.5),
+                    WobbleAmp = 0.15f + (float)(rng.NextDouble() * 0.2f),
+                    WobbleSpeed = 1.5f + (float)(rng.NextDouble() * 1.5f),
+                    Delay = (float)(rng.NextDouble() * 0.1f),
+                };
+            }
+            data = new Data { Hearts = hearts };
+            anim.EffectData = data;
+        }
+
+        for (int i = 0; i < data.Hearts.Length; i++)
+        {
+            var h = data.Hearts[i];
+
+            float lt = (t - h.Delay) / (1f - h.Delay);
+            if (lt <= 0f || lt >= 1f) continue;
+
+            // 向外弹出 + 越往后越快地上浮
+            float outward = Easing.EaseOutQuad(lt) * MaxDist * h.Dist * scale;
+            float rise = Easing.EaseInQuad(lt) * RiseDist * scale;
+            float px = cx + h.DirX * outward;
+            float py = cy + h.DirY * outward - rise;
+
+            // 出现弹跳 + 后段缩小
+            float pop = Easing.EaseOutBack(Math.Min(1f, lt * 3.5f));
+            float shrink = lt < 0.7f ? 1f : 1f - (lt - 0.7f) / 0.3f;
+            float sz = h.Size * scale * pop * shrink;
+            if (sz < 0.4f) continue;
+
+            // 淡入淡出
+            float fadeIn = Math.Min(1f, lt * 5f);
+            float fadeOut = 1f - Easing.EaseInQuad(Math.Max(0f, lt - 0.5f) / 0.5f);
+            float alpha = fadeIn * fadeOut;
+            if (alpha <= 0.01f) continue;
+
+            // 摇摆旋转
+            float rot = h.InitRot + h.WobbleAmp
+                      * (float)Math.Sin(lt * h.WobbleSpeed * Math.PI * 2);
+            float cosR = (float)Math.Cos(rot);
+            float sinR = (float)Math.Sin(rot);
+
+            int a = (int)(255 * alpha);
+            _brush.Color = Color.FromArgb(a,
+                Math.Min(255, (int)(baseColor.R * h.Bri)),
+                Math.Min(255, (int)(baseColor.G * h.Bri)),
+                Math.Min(255, (int)(baseColor.B * h.Bri)));
+
+            for (int j = 0; j < Segments; j++)
+            {
+                float ux = HeartX[j] * sz;
+                float uy = HeartY[j] * sz;
+                _pts[j].X = ux * cosR - uy * sinR + px;
+                _pts[j].Y = ux * sinR + uy * cosR + py;
+            }
+
+            g.FillPolygon(_brush, _pts);
+
+            // 边缘淡白高光
+            int edgeA = (int)(a * 0.3f);
+            if (edgeA > 0)
+            {
+                _edgePen.Color = Color.FromArgb(edgeA, Color.White);
+                _edgePen.Width = 0.8f * scale;
+                g.DrawPolygon(_edgePen, _pts);
+            }
+        }
+    }
+}
+
+// ==================== 效果：雪花 ====================
+
+class SnowflakeEffect : IClickEffect
+{
+    public string Name { get { return "雪花"; } }
+    public int Duration { get { return 700; } }
+
+    const int Arms = 6;            // 六角
+    const float BranchDeg = 32f;   // 分叉角度
+    const int MinFlakes = 3;       // 3~5 片
+    const float SpreadX = 18f;     // 初始水平散布(避免起始重叠)
+    const float SpreadY = 16f;     // 初始纵向散布(避免从同一水平线起落)
+    const float FallDist = 46f;    // 下落距离
+    const float BaseSize = 4f;     // 雪花基础半径(小)
+    const float SizeJitter = 4f;   // 尺寸抖动，使每片明显不同(4~8)
+
+    // 分叉沿臂的位置与长度
+    static readonly float[] BranchFrac = { 0.5f, 0.78f };
+    static readonly float[] BranchLen = { 0.34f, 0.22f };
+
+    // 单位雪花的所有线段(旋转 0 时,相对花心),静态预计算一次
+    static readonly float[] SX0, SY0, SX1, SY1;
+    static readonly int SegCount;
+
+    static SnowflakeEffect()
+    {
+        int per = 1 + BranchFrac.Length * 2; // 每臂:1 主干 + 每个分叉点左右各一
+        SegCount = Arms * per;
+        SX0 = new float[SegCount];
+        SY0 = new float[SegCount];
+        SX1 = new float[SegCount];
+        SY1 = new float[SegCount];
+
+        int idx = 0;
+        float branchRad = BranchDeg * (float)Math.PI / 180f;
+        for (int k = 0; k < Arms; k++)
+        {
+            float armAng = k * (float)(Math.PI * 2) / Arms;
+            float ca = (float)Math.Cos(armAng);
+            float sa = (float)Math.Sin(armAng);
+
+            // 主干:花心 → 臂尖
+            SX0[idx] = 0; SY0[idx] = 0; SX1[idx] = ca; SY1[idx] = sa; idx++;
+
+            for (int f = 0; f < BranchFrac.Length; f++)
+            {
+                float bx = ca * BranchFrac[f];
+                float by = sa * BranchFrac[f];
+                float len = BranchLen[f];
+                float lca = (float)Math.Cos(armAng + branchRad);
+                float lsa = (float)Math.Sin(armAng + branchRad);
+                float rca = (float)Math.Cos(armAng - branchRad);
+                float rsa = (float)Math.Sin(armAng - branchRad);
+                // 左分叉
+                SX0[idx] = bx; SY0[idx] = by; SX1[idx] = bx + lca * len; SY1[idx] = by + lsa * len; idx++;
+                // 右分叉
+                SX0[idx] = bx; SY0[idx] = by; SX1[idx] = bx + rca * len; SY1[idx] = by + rsa * len; idx++;
+            }
+        }
+    }
+
+    class Particle
+    {
+        public float InitX, InitY; // 初始偏移
+        public float FallFactor;   // 下落速度系数
+        public float SwayAmp;      // 左右飘摆幅度
+        public float SwayFreq;
+        public float SwayPhase;
+        public float Size;
+        public float Bri;
+        public float InitRot;
+        public float RotSpeed;     // 缓慢自转(弧度/全程)
+        public float Delay;
+    }
+
+    class Data { public Particle[] Flakes; }
+
+    Pen _pen = new Pen(Color.Black, 1.2f);
+    SolidBrush _dot = new SolidBrush(Color.Black);
+
+    public void Cleanup()
+    {
+        _pen.Dispose();
+        _dot.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float t = anim.Age / (float)Duration;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 0x534E4F57));
+            int count = MinFlakes + rng.Next(3); // 3~5
+            var flakes = new Particle[count];
+            // 水平方向均匀散布，避免起始位置重叠
+            for (int i = 0; i < count; i++)
+            {
+                float spreadT = (i + 0.2f + (float)rng.NextDouble() * 0.6f) / count; // 0~1
+                flakes[i] = new Particle
+                {
+                    InitX = (spreadT * 2f - 1f) * SpreadX,
+                    InitY = (float)((rng.NextDouble() - 0.5) * 2.0) * SpreadY,
+                    FallFactor = 0.8f + (float)(rng.NextDouble() * 0.5f),
+                    SwayAmp = 3f + (float)(rng.NextDouble() * 2.5f),
+                    SwayFreq = 0.5f + (float)(rng.NextDouble() * 0.5f),
+                    SwayPhase = (float)(rng.NextDouble() * Math.PI * 2),
+                    Size = BaseSize + (float)(rng.NextDouble() * SizeJitter),
+                    Bri = 0.8f + (float)(rng.NextDouble() * 0.2f),
+                    InitRot = (float)(rng.NextDouble() * Math.PI * 2),
+                    RotSpeed = (float)((rng.NextDouble() - 0.5) * 1.2),
+                    Delay = (float)(rng.NextDouble() * 0.12f),
+                };
+            }
+            data = new Data { Flakes = flakes };
+            anim.EffectData = data;
+        }
+
+        for (int i = 0; i < data.Flakes.Length; i++)
+        {
+            var fl = data.Flakes[i];
+
+            float lt = (t - fl.Delay) / (1f - fl.Delay);
+            if (lt <= 0f || lt >= 1f) continue;
+
+            // 匀速下落 + 左右飘摆(飘飘然)
+            float fall = lt * FallDist * fl.FallFactor * scale;
+            float sway = fl.SwayAmp * (float)Math.Sin(lt * fl.SwayFreq * Math.PI * 2 + fl.SwayPhase) * scale;
+            float px = cx + fl.InitX * scale + sway;
+            float py = cy + fl.InitY * scale + fall;
+
+            // 出现弹入 + 后段(40%)逐渐变小
+            float pop = Easing.EaseOutBack(Math.Min(1f, lt * 4f));
+            float shrink = lt < 0.6f ? 1f : 1f - (lt - 0.6f) / 0.4f;
+            float sz = fl.Size * scale * pop * shrink;
+            if (sz < 0.5f) continue;
+
+            // 淡入 + 后段淡出(与缩小同步，飘着变小消失)
+            float fadeIn = Math.Min(1f, lt * 6f);
+            float fadeOut = 1f - Easing.EaseInQuad(Math.Max(0f, lt - 0.6f) / 0.4f);
+            float alpha = fadeIn * fadeOut;
+            if (alpha <= 0.01f) continue;
+
+            float rot = fl.InitRot + fl.RotSpeed * lt;
+            float cosR = (float)Math.Cos(rot);
+            float sinR = (float)Math.Sin(rot);
+
+            int a = (int)(255 * alpha);
+            _pen.Color = Color.FromArgb(a,
+                Math.Min(255, (int)(baseColor.R * fl.Bri)),
+                Math.Min(255, (int)(baseColor.G * fl.Bri)),
+                Math.Min(255, (int)(baseColor.B * fl.Bri)));
+            _pen.Width = Math.Max(0.6f, sz * 0.13f);
+
+            for (int s = 0; s < SegCount; s++)
+            {
+                float x0 = (SX0[s] * cosR - SY0[s] * sinR) * sz + px;
+                float y0 = (SX0[s] * sinR + SY0[s] * cosR) * sz + py;
+                float x1 = (SX1[s] * cosR - SY1[s] * sinR) * sz + px;
+                float y1 = (SX1[s] * sinR + SY1[s] * cosR) * sz + py;
+                g.DrawLine(_pen, x0, y0, x1, y1);
+            }
+
+            // 花心小亮点
+            float dotR = sz * 0.16f;
+            if (dotR >= 0.4f)
+            {
+                _dot.Color = Color.FromArgb(a, Color.White);
+                g.FillEllipse(_dot, px - dotR, py - dotR, dotR * 2, dotR * 2);
+            }
+        }
+    }
+}
+
+// ==================== 效果：彩屑 ====================
+
+class ConfettiEffect : IClickEffect
+{
+    public string Name { get { return "彩屑"; } }
+    public int Duration { get { return 850; } }
+
+    const int MinPieces = 8;       // 8~12 片
+    const float MinSpeed = 58f;    // 初速度(向上弹出)
+    const float SpeedJitter = 52f;
+    const float PieceW = 2.6f;     // 矩形半宽
+    const float PieceH = 1.6f;     // 矩形半高
+    const float FadeStart = 0.62f; // 开始淡出的时间点
+    const float HueSpread = 55f;   // 每片相对基色的色相偏移范围(±度)
+
+    class Piece
+    {
+        public float Vx, Vy;             // 初速度分量
+        public float Drag;               // 空气阻力系数 k
+        public float TermVy;             // 竖直终端速度(向下为正)
+        public float SwayAmp, SwayPhase, SwayFreq; // 下落时左右飘动
+        public float W, H;               // 半宽/半高
+        public int R, G, B;              // 预计算的纸屑颜色
+        public float InitRot, RotSpeed;  // 平面旋转
+        public float FlipPhase, FlipSpeed; // 翻面(宽度缩放)
+    }
+
+    class Data { public Piece[] Pieces; }
+
+    SolidBrush _brush = new SolidBrush(Color.Black);
+    readonly PointF[] _quad = new PointF[4]; // 复用四角缓冲(仅 UI 线程，串行)
+
+    public void Cleanup()
+    {
+        _brush.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float t = anim.Age / (float)Duration;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            // 基色转 HSV，按片做色相/明度抖动，生成五彩纸屑(仍锚定用户所选颜色)
+            float baseH, baseS, baseV;
+            RgbToHsv(baseColor.R, baseColor.G, baseColor.B, out baseH, out baseS, out baseV);
+
+            var rng = new Random(unchecked(anim.RandomSeed ^ 0x434F4E46));
+            int count = MinPieces + rng.Next(5); // 8~12
+            var pieces = new Piece[count];
+            for (int i = 0; i < count; i++)
+            {
+                // 向上扇区弹出 [-160°, -20°](屏幕 y 向下，向上即 -y)，之后空气阻力 + 飘落
+                double ang = (-160.0 + rng.NextDouble() * 140.0) * Math.PI / 180.0;
+                float speed = MinSpeed + (float)(rng.NextDouble() * SpeedJitter);
+
+                // 每片独立色相偏移 + 饱和度/明度抖动
+                float h = baseH + (float)((rng.NextDouble() - 0.5) * 2.0 * HueSpread);
+                if (h < 0f) h += 360f; else if (h >= 360f) h -= 360f;
+                float s = Clamp01(baseS * (0.85f + (float)(rng.NextDouble() * 0.3f)));
+                float v = Clamp01(baseV * (0.78f + (float)(rng.NextDouble() * 0.32f)));
+                int r, gg, b;
+                HsvToRgb(h, s, v, out r, out gg, out b);
+
+                pieces[i] = new Piece
+                {
+                    Vx = (float)Math.Cos(ang) * speed,
+                    Vy = (float)Math.Sin(ang) * speed,
+                    Drag = 2.4f + (float)(rng.NextDouble() * 1.3f),
+                    TermVy = 70f + (float)(rng.NextDouble() * 70f),
+                    SwayAmp = 4f + (float)(rng.NextDouble() * 7f),
+                    SwayPhase = (float)(rng.NextDouble() * Math.PI * 2),
+                    SwayFreq = 4f + (float)(rng.NextDouble() * 5f),
+                    W = PieceW * (0.7f + (float)(rng.NextDouble() * 0.6f)),
+                    H = PieceH * (0.7f + (float)(rng.NextDouble() * 0.6f)),
+                    R = r, G = gg, B = b,
+                    InitRot = (float)(rng.NextDouble() * Math.PI * 2),
+                    RotSpeed = (float)((rng.NextDouble() - 0.5) * 14.0),
+                    FlipPhase = (float)(rng.NextDouble() * Math.PI * 2),
+                    FlipSpeed = 1.5f + (float)(rng.NextDouble() * 2.5f),
+                };
+            }
+            data = new Data { Pieces = pieces };
+            anim.EffectData = data;
+        }
+
+        float time = t * Duration / 1000f; // 秒
+
+        for (int i = 0; i < data.Pieces.Length; i++)
+        {
+            var p = data.Pieces[i];
+
+            // 空气阻力模型:水平速度衰减为 0，竖直趋于终端速度，纸屑“飘”而非“砸”
+            float ex = (float)Math.Exp(-p.Drag * time);
+            float inv = (1f - ex) / p.Drag;
+            float dispX = p.Vx * inv;
+            float dispY = p.TermVy * time + (p.Vy - p.TermVy) * inv;
+            // 飘动随阻力生效逐渐显现(初段直线弹出，后段左右摇摆)
+            float sway = p.SwayAmp * (1f - ex) * (float)Math.Sin(p.SwayPhase + p.SwayFreq * time);
+
+            float px = cx + (dispX + sway) * scale;
+            float py = cy + dispY * scale;
+
+            // 淡入(防硬边) + 后段淡出
+            float alpha = Math.Min(1f, t * 10f);
+            if (t > FadeStart) alpha *= 1f - (t - FadeStart) / (1f - FadeStart);
+            if (alpha <= 0.01f) continue;
+
+            // 翻滚:平面旋转 + 宽度缩放模拟翻面(纸屑转到侧面变窄)
+            float rot = p.InitRot + p.RotSpeed * t;
+            float flip = (float)Math.Abs(Math.Cos(p.FlipPhase + p.FlipSpeed * t * Math.PI * 2));
+            float hw = p.W * (0.2f + 0.8f * flip) * scale;
+            float hh = p.H * scale;
+            if (hw < 0.3f) hw = 0.3f;
+
+            float cosR = (float)Math.Cos(rot);
+            float sinR = (float)Math.Sin(rot);
+
+            int a = (int)(255 * alpha);
+            _brush.Color = Color.FromArgb(a, p.R, p.G, p.B);
+
+            // 四角(±hw, ±hh)旋转 + 平移
+            float xw = hw * cosR, yw = hw * sinR;
+            float xh = hh * sinR, yh = hh * cosR;
+            _quad[0].X = px - xw + xh; _quad[0].Y = py - yw - yh;
+            _quad[1].X = px + xw + xh; _quad[1].Y = py + yw - yh;
+            _quad[2].X = px + xw - xh; _quad[2].Y = py + yw + yh;
+            _quad[3].X = px - xw - xh; _quad[3].Y = py - yw + yh;
+
+            g.FillPolygon(_brush, _quad);
+        }
+    }
+
+    static float Clamp01(float v) { return v < 0f ? 0f : (v > 1f ? 1f : v); }
+
+    static void RgbToHsv(int r, int g, int b, out float h, out float s, out float v)
+    {
+        float rf = r / 255f, gf = g / 255f, bf = b / 255f;
+        float max = Math.Max(rf, Math.Max(gf, bf));
+        float min = Math.Min(rf, Math.Min(gf, bf));
+        float d = max - min;
+        v = max;
+        s = max <= 0f ? 0f : d / max;
+        if (d <= 0f) { h = 0f; return; }
+        if (max == rf) h = 60f * (((gf - bf) / d) % 6f);
+        else if (max == gf) h = 60f * (((bf - rf) / d) + 2f);
+        else h = 60f * (((rf - gf) / d) + 4f);
+        if (h < 0f) h += 360f;
+    }
+
+    static void HsvToRgb(float h, float s, float v, out int r, out int g, out int b)
+    {
+        float c = v * s;
+        float x = c * (1f - Math.Abs((h / 60f) % 2f - 1f));
+        float m = v - c;
+        float rf, gf, bf;
+        if (h < 60f) { rf = c; gf = x; bf = 0f; }
+        else if (h < 120f) { rf = x; gf = c; bf = 0f; }
+        else if (h < 180f) { rf = 0f; gf = c; bf = x; }
+        else if (h < 240f) { rf = 0f; gf = x; bf = c; }
+        else if (h < 300f) { rf = x; gf = 0f; bf = c; }
+        else { rf = c; gf = 0f; bf = x; }
+        r = (int)((rf + m) * 255f + 0.5f);
+        g = (int)((gf + m) * 255f + 0.5f);
+        b = (int)((bf + m) * 255f + 0.5f);
+        if (r > 255) r = 255; if (g > 255) g = 255; if (b > 255) b = 255;
+    }
+}
+
+// ==================== 效果：流萤 ====================
+
+class FireflyEffect : IClickEffect
+{
+    public string Name { get { return "流萤"; } }
+    public int Duration { get { return 520; } }
+
+    const int MinDots = 5;        // 5~6 颗
+    const float FadeOut = 0.58f;  // 开始整体淡出的时间点
+
+    class Dot
+    {
+        public float StartAngle, StartRadius;
+        public float Spin;             // 向心收拢时的旋转量(优雅弧线)
+        public float CoreR;            // 核心半径
+        public float TwPhase, TwSpeed; // 萤火明灭
+    }
+
+    class Data { public Dot[] Dots; }
+
+    SolidBrush _brush = new SolidBrush(Color.Black);
+
+    public void Cleanup()
+    {
+        _brush.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float t = anim.Age / (float)Duration;
+        float scale = anim.Scale;
+
+        Color baseColor = anim.GetColor(color);
+        int hotR = (int)(baseColor.R + (255 - baseColor.R) * 0.6f);
+        int hotG = (int)(baseColor.G + (255 - baseColor.G) * 0.6f);
+        int hotB = (int)(baseColor.B + (255 - baseColor.B) * 0.6f);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 0x46495245));
+            int count = MinDots + rng.Next(2); // 5~6
+            var dots = new Dot[count];
+            float a0 = (float)(rng.NextDouble() * Math.PI * 2);
+            for (int i = 0; i < count; i++)
+            {
+                // 均匀铺开 + 轻微抖动，收拢时整齐又不呆板
+                dots[i] = new Dot
+                {
+                    StartAngle = a0 + (float)(i * Math.PI * 2 / count + (rng.NextDouble() - 0.5) * 0.5),
+                    StartRadius = 17f + (float)(rng.NextDouble() * 9f),
+                    Spin = (float)((0.6 + rng.NextDouble() * 0.6) * (rng.Next(2) == 0 ? 1 : -1)),
+                    CoreR = 1.1f + (float)(rng.NextDouble() * 0.8f),
+                    TwPhase = (float)(rng.NextDouble() * Math.PI * 2),
+                    TwSpeed = 6f + (float)(rng.NextDouble() * 5f),
+                };
+            }
+            data = new Data { Dots = dots };
+            anim.EffectData = data;
+        }
+
+        // 整体淡入(防硬边) + 后段淡出
+        float globalA = Math.Min(1f, t * 6f);
+        if (t > FadeOut) globalA *= 1f - (t - FadeOut) / (1f - FadeOut);
+        if (globalA <= 0.01f) return;
+
+        float prog = Easing.EaseInOutCubic(t); // 向心收拢进度(中段最快，首尾舒缓)
+
+        for (int i = 0; i < data.Dots.Length; i++)
+        {
+            var d = data.Dots[i];
+
+            float ang = d.StartAngle + d.Spin * prog;
+            float radius = d.StartRadius * (1f - prog) * scale;
+            float px = cx + (float)Math.Cos(ang) * radius;
+            float py = cy + (float)Math.Sin(ang) * radius;
+
+            // 萤火明灭
+            float tw = 0.7f + 0.3f * (float)Math.Sin(d.TwPhase + d.TwSpeed * t);
+            float aDot = globalA * tw;
+
+            float cr = d.CoreR * scale;
+
+            // 外层柔光
+            float gr = cr * 3.2f;
+            _brush.Color = Color.FromArgb((int)(65 * aDot), baseColor);
+            g.FillEllipse(_brush, px - gr, py - gr, gr * 2f, gr * 2f);
+            // 中层
+            float mr = cr * 1.8f;
+            _brush.Color = Color.FromArgb((int)(115 * aDot), baseColor);
+            g.FillEllipse(_brush, px - mr, py - mr, mr * 2f, mr * 2f);
+            // 核心(近白)
+            _brush.Color = Color.FromArgb((int)(235 * aDot), hotR, hotG, hotB);
+            g.FillEllipse(_brush, px - cr, py - cr, cr * 2f, cr * 2f);
+        }
+
+        // 收拢中心：随萤火聚拢渐亮的一点柔光，末段随整体淡出消散
+        float centerI = prog * prog * globalA;
+        if (centerI > 0.01f)
+        {
+            float r2 = (3f + 5f * prog) * scale;
+            _brush.Color = Color.FromArgb((int)(85 * centerI), baseColor);
+            g.FillEllipse(_brush, cx - r2, cy - r2, r2 * 2f, r2 * 2f);
+
+            float r1 = (1.5f + 2f * prog) * scale;
+            _brush.Color = Color.FromArgb((int)(200 * centerI), hotR, hotG, hotB);
+            g.FillEllipse(_brush, cx - r1, cy - r1, r1 * 2f, r1 * 2f);
         }
     }
 }
