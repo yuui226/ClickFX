@@ -2206,6 +2206,260 @@ class FireflyEffect : IClickEffect
     }
 }
 
+// ==================== 效果：恭喜发财 ====================
+
+class FireworkEffect : IClickEffect
+{
+    public string Name { get { return "恭喜发财"; } }
+    public int Duration { get { return 1100; } }
+
+    const float FontPx = 22f;      // 基础字号(像素)，再乘 anim.Scale
+    const float RiseEnd = 0.30f;   // 升空阶段占比，之后炸开
+    const float MaxTiltDeg = 16f;  // 文字倾斜(±)，仅轻微歪头
+    const float GravFall = 10f;    // 炸开后火星轻微下坠(围绕文字，不远离)
+    const int TrailDots = 5;       // 每颗火星的彗尾采样点数
+
+    class Particle { public float Cos, Sin, Speed, Bri, TwPhase, TwSpeed; }
+
+    class Data
+    {
+        public float Dx, RiseH;    // 炸点相对点击处的偏移(未缩放)
+        public float TiltDeg, SizeMul, AlphaMul; // 文字倾斜/大小/透明度随机
+        public Color TextColor;    // 随机配色下与火花不同的文字色
+        public Particle[] Parts;
+        public string Word;        // 本次随机:「恭喜」或「发财」
+        public float Tw, Th;       // 文本尺寸,首次测量后缓存
+    }
+
+    Font _font;
+    StringFormat _fmt;
+    SolidBrush _brush = new SolidBrush(Color.Black);
+    Pen _ringPen = new Pen(Color.Black, 1.5f); // 起手点击反馈的小环
+
+    public FireworkEffect()
+    {
+        // 楷体；缺失时 GDI 会回退到默认字体
+        _font = new Font("KaiTi", FontPx, FontStyle.Bold, GraphicsUnit.Pixel);
+        _fmt = StringFormat.GenericTypographic;
+    }
+
+    public void Cleanup()
+    {
+        if (_font != null) { _font.Dispose(); _font = null; }
+        if (_fmt != null) { _fmt.Dispose(); _fmt = null; }
+        _brush.Dispose();
+        _ringPen.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float scale = anim.Scale;
+        Color baseColor = anim.GetColor(color);
+        // 火星头部偏白，更像烟花
+        int hotR = (int)(baseColor.R + (255 - baseColor.R) * 0.35f);
+        int hotG = (int)(baseColor.G + (255 - baseColor.G) * 0.35f);
+        int hotB = (int)(baseColor.B + (255 - baseColor.B) * 0.35f);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 0x46414341));
+            int n = 24 + rng.Next(9); // 24~32 颗火星
+            var parts = new Particle[n];
+            for (int i = 0; i < n; i++)
+            {
+                double ang = rng.NextDouble() * Math.PI * 2;
+                parts[i] = new Particle
+                {
+                    Cos = (float)Math.Cos(ang),
+                    Sin = (float)Math.Sin(ang),
+                    Speed = 16f + (float)(rng.NextDouble() * 22f), // 扩散半径(围绕文字)
+                    Bri = 0.7f + (float)(rng.NextDouble() * 0.3f),
+                    TwPhase = (float)(rng.NextDouble() * Math.PI * 2),
+                    TwSpeed = 8f + (float)(rng.NextDouble() * 9f),  // 闪烁
+                };
+            }
+            data = new Data
+            {
+                Dx = (float)((rng.NextDouble() - 0.5) * 28.0),    // 升空时的水平随机
+                RiseH = 44f + (float)(rng.NextDouble() * 46f),    // 升空高度(44~90)
+                TiltDeg = (float)((rng.NextDouble() - 0.5) * 2.0 * MaxTiltDeg),
+                SizeMul = 0.8f + (float)(rng.NextDouble() * 0.6f),   // 字号随机(0.8~1.4)
+                AlphaMul = 0.55f + (float)(rng.NextDouble() * 0.45f), // 透明度随机(0.55~1.0)
+                // 随机配色时，文字取一个与火花明显不同的色相；否则与火花同色
+                TextColor = color.RandomColor ? RandomDistinctColor(rng, baseColor) : baseColor,
+                Parts = parts,
+                Word = rng.Next(2) == 0 ? "恭喜" : "发财",
+                Tw = -1f,
+            };
+            anim.EffectData = data;
+        }
+
+        float t = anim.Age / (float)Duration;
+
+        float bx = cx + data.Dx * scale;          // 炸点
+        float by = cy - data.RiseH * scale;
+
+        // 起手点击反馈：点击处一圈快速扩散淡出的小环 + 亮芯，先让人感知“点在这里”
+        float ct = t / 0.16f; // 前 16% 时间(约 176ms)
+        if (ct < 1f)
+        {
+            float ce = Easing.EaseOutQuad(ct);
+            float cFade = 1f - ce;
+            float rr = (3f + 9f * ce) * scale;
+            _ringPen.Width = 1.5f * scale * cFade + 0.3f;
+            _ringPen.Color = Color.FromArgb((int)(200 * cFade), baseColor);
+            g.DrawEllipse(_ringPen, cx - rr, cy - rr, rr * 2f, rr * 2f);
+
+            float dr = 2.2f * scale * cFade;
+            if (dr > 0.3f)
+            {
+                _brush.Color = Color.FromArgb((int)(220 * cFade), hotR, hotG, hotB);
+                g.FillEllipse(_brush, cx - dr, cy - dr, dr * 2f, dr * 2f);
+            }
+        }
+
+        if (t < RiseEnd)
+        {
+            // —— 升空：光点从点击处加速上升、末端减速到炸点，带一截淡尾 ——
+            float rt = t / RiseEnd;
+            float re = Easing.EaseOutQuad(rt);
+            float px = cx + (bx - cx) * re;
+            float py = cy + (by - cy) * re;
+
+            for (int k = 4; k >= 1; k--)
+            {
+                float tp = re - k * 0.1f;
+                if (tp <= 0f) continue;
+                float txp = cx + (bx - cx) * tp;
+                float typ = cy + (by - cy) * tp;
+                float tr = (1.4f - k * 0.18f) * scale;
+                _brush.Color = Color.FromArgb((int)(70 * (1f - k * 0.2f)), baseColor);
+                g.FillEllipse(_brush, txp - tr, typ - tr, tr * 2f, tr * 2f);
+            }
+
+            float gr = 3f * scale;
+            _brush.Color = Color.FromArgb(90, baseColor);
+            g.FillEllipse(_brush, px - gr, py - gr, gr * 2f, gr * 2f);
+            float hr = 1.6f * scale;
+            _brush.Color = Color.FromArgb(235, hotR, hotG, hotB);
+            g.FillEllipse(_brush, px - hr, py - hr, hr * 2f, hr * 2f);
+            return;
+        }
+
+        // —— 炸开 ——
+        float bt = (t - RiseEnd) / (1f - RiseEnd); // 0~1
+        float spread = Easing.EaseOutQuad(bt);     // 火星扩散(先快后慢)
+        float pFade = 1f - bt * bt;                // 火星淡出(后段才明显减弱，整体更亮更持久)
+
+        // 起爆闪光
+        if (bt < 0.22f)
+        {
+            float fl = 1f - bt / 0.22f;
+            float r2 = (4f + 14f * (1f - fl)) * scale;
+            _brush.Color = Color.FromArgb((int)(150 * fl * fl), baseColor);
+            g.FillEllipse(_brush, bx - r2, by - r2, r2 * 2f, r2 * 2f);
+            float r1 = (2f + 5f * (1f - fl)) * scale;
+            _brush.Color = Color.FromArgb((int)(220 * fl), hotR, hotG, hotB);
+            g.FillEllipse(_brush, bx - r1, by - r1, r1 * 2f, r1 * 2f);
+        }
+
+        // 火星：径向飞散 + 轻微下坠，沿轨迹采样若干点成柔和彗尾(头亮尾淡、随重力自然弯曲)
+        for (int i = 0; i < data.Parts.Length; i++)
+        {
+            var p = data.Parts[i];
+            // 闪烁，让整片火星像真实烟花一样明灭跳动
+            float tw = 0.6f + 0.4f * (float)Math.Sin(p.TwPhase + p.TwSpeed * bt);
+            float fade = pFade * p.Bri * tw;
+            if (fade <= 0.02f) continue;
+
+            float ps = p.Speed * scale; // 每颗的扩散尺度，外提一次
+            for (int j = 0; j < TrailDots; j++)
+            {
+                // 亮度沿彗尾单调递减：先算便宜的 alpha，过暗就直接收尾，省去坐标运算
+                float falloff = 1f - (float)j / TrailDots; // 头部=1，向尾部递减
+                int aa = (int)((j == 0 ? 255 : 210) * fade * falloff);
+                if (aa <= 1) break;
+                float sbt = bt - j * 0.05f;
+                if (sbt < 0f) break;
+
+                float sp = Easing.EaseOutQuad(sbt);
+                float d = ps * sp;
+                float x = bx + p.Cos * d;
+                float y = by + p.Sin * d + GravFall * sbt * sbt * scale;
+                float r = (0.4f + 1.3f * falloff) * scale;
+
+                if (j == 0) _brush.Color = Color.FromArgb(aa, hotR, hotG, hotB); // 头点近白
+                else _brush.Color = Color.FromArgb(aa, baseColor);
+                g.FillEllipse(_brush, x - r, y - r, r * 2f, r * 2f);
+            }
+        }
+
+        // 文字：炸开瞬间弹出「恭喜」或「发财」，随烟花一起淡出
+        if (data.Tw < 0f)
+        {
+            SizeF sz = g.MeasureString(data.Word, _font, new PointF(0f, 0f), _fmt);
+            data.Tw = sz.Width;
+            data.Th = sz.Height;
+        }
+        float pop = Easing.EaseOutBack(Math.Min(1f, bt / 0.22f)); // 弹出
+        float ta = Math.Min(1f, bt / 0.12f);                       // 快速浮现
+        if (bt > 0.6f) ta *= 1f - (bt - 0.6f) / 0.4f;              // 后段淡出
+        if (ta > 0.01f)
+        {
+            _brush.Color = Color.FromArgb((int)(255 * ta * data.AlphaMul), data.TextColor);
+            GraphicsState st = g.Save();
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+            g.TranslateTransform(bx, by);
+            g.RotateTransform(data.TiltDeg);
+            float s = scale * data.SizeMul * (0.5f + 0.5f * pop);
+            g.ScaleTransform(s, s);
+            g.DrawString(data.Word, _font, _brush, -data.Tw / 2f, -data.Th / 2f, _fmt);
+            g.Restore(st);
+        }
+    }
+
+    // 生成一个与 from 色相明显不同(偏移 110~250°)的鲜艳随机色
+    static Color RandomDistinctColor(Random rng, Color from)
+    {
+        float h = Hue(from) + 110f + (float)(rng.NextDouble() * 140.0);
+        if (h >= 360f) h -= 360f;
+        float s = 0.75f + (float)(rng.NextDouble() * 0.25f);
+        float v = 0.85f + (float)(rng.NextDouble() * 0.15f);
+        float c = v * s;
+        float x = c * (1f - Math.Abs((h / 60f) % 2f - 1f));
+        float m = v - c;
+        float r, g, b;
+        if (h < 60f) { r = c; g = x; b = 0f; }
+        else if (h < 120f) { r = x; g = c; b = 0f; }
+        else if (h < 180f) { r = 0f; g = c; b = x; }
+        else if (h < 240f) { r = 0f; g = x; b = c; }
+        else if (h < 300f) { r = x; g = 0f; b = c; }
+        else { r = c; g = 0f; b = x; }
+        return Color.FromArgb(
+            (int)((r + m) * 255f + 0.5f),
+            (int)((g + m) * 255f + 0.5f),
+            (int)((b + m) * 255f + 0.5f));
+    }
+
+    static float Hue(Color col)
+    {
+        float r = col.R / 255f, g = col.G / 255f, b = col.B / 255f;
+        float max = Math.Max(r, Math.Max(g, b));
+        float min = Math.Min(r, Math.Min(g, b));
+        float d = max - min;
+        if (d <= 0f) return 0f;
+        float h;
+        if (max == r) h = 60f * (((g - b) / d) % 6f);
+        else if (max == g) h = 60f * (((b - r) / d) + 2f);
+        else h = 60f * (((r - g) / d) + 4f);
+        if (h < 0f) h += 360f;
+        return h;
+    }
+}
+
 // ==================== 效果注册表 ====================
 
 static class EffectRegistry
