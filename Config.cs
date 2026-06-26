@@ -20,6 +20,7 @@ class AppConfig
     public ColorConfig RightClick { get; set; }
     public string InfoText { get; set; }
     public string InfoUrl { get; set; }
+    public string RandomTexts { get; set; } // 「随机文字」效果的词库，每行一句
     public bool AutoStart { get; set; }
     public int HotkeyModifiers { get; set; }
     public int HotkeyKey { get; set; }
@@ -35,6 +36,7 @@ class AppConfig
         RightClick = new ColorConfig("#FF6060");
         InfoText = "";
         InfoUrl = "";
+        RandomTexts = "财源滚滚\n加油!\n心想事成\n好运连连\n大吉大利\n万事如意\n步步高升\n福星高照";
         AutoStart = false;
         HotkeyModifiers = 0;
         HotkeyKey = 0;
@@ -137,6 +139,7 @@ static class ConfigManager
             + "  \"RightClick\": " + SerializeColor(c.RightClick) + ",\n"
             + "  \"InfoText\": " + Quote(c.InfoText ?? "") + ",\n"
             + "  \"InfoUrl\": " + Quote(c.InfoUrl ?? "") + ",\n"
+            + "  \"RandomTexts\": " + Quote(c.RandomTexts ?? "") + ",\n"
             + "  \"AutoStart\": " + (c.AutoStart ? "true" : "false") + ",\n"
             + "  \"HotkeyModifiers\": " + c.HotkeyModifiers + ",\n"
             + "  \"HotkeyKey\": " + c.HotkeyKey + ",\n"
@@ -186,6 +189,8 @@ static class ConfigManager
             c.InfoText = d["InfoText"];
         if (d.ContainsKey("InfoUrl"))
             c.InfoUrl = d["InfoUrl"];
+        if (d.ContainsKey("RandomTexts"))
+            c.RandomTexts = d["RandomTexts"];
         if (d.ContainsKey("AutoStart"))
             c.AutoStart = d["AutoStart"].ToLower() == "true";
         int n;
@@ -321,6 +326,8 @@ class ConfigForm : Form
     ComboBox _leftEffectCombo, _rightEffectCombo, _triggerModeCombo;
     Panel _leftPreview, _rightPreview;
     TextBox _leftHex, _rightHex;
+    TextBox _randomTextBox;
+    Label _randomLabel;
     Button _leftPick, _rightPick;
     CheckBox _leftRandomBtn, _rightRandomBtn;
     LinkLabel _projectLink;
@@ -342,6 +349,33 @@ class ConfigForm : Form
         InitUI();
         LoadValues(config);
         _loading = false;
+        UpdateRandomTextVisibility();
+    }
+
+    const string RandomTextEffectName = "随机文字";
+    const int RandomBlockH = 84;     // 「随机文字」标签 + 文本框占用的垂直高度
+    const int FormShownHeight = 414; // 显示文本框时的窗口高度（= InitUI 的 ClientSize 高）
+    bool _randomShown = true;        // 布局初始按"显示"构建
+    Dictionary<Control, int> _belowTops; // "显示"布局下，文本框下方各控件的原始 Top
+
+    // 仅当左键或右键选了「随机文字」效果时显示词库文本框；隐藏时把下方控件整体上移
+    // 并收缩窗口高度，避免留下空白，显示时再还原。
+    // 用记录的原始 Top 做绝对定位（而非相对增减），重复切换也不会累积漂移。
+    void UpdateRandomTextVisibility()
+    {
+        bool show = (_leftEffectCombo.SelectedItem as string) == RandomTextEffectName
+                 || (_rightEffectCombo.SelectedItem as string) == RandomTextEffectName;
+        if (show == _randomShown) return;
+
+        int off = show ? 0 : RandomBlockH; // 隐藏时下方控件整体上移 RandomBlockH
+        SuspendLayout();
+        foreach (var kv in _belowTops)
+            kv.Key.Top = kv.Value - off;
+        _randomLabel.Visible = show;
+        _randomTextBox.Visible = show;
+        ClientSize = new Size(ClientSize.Width, FormShownHeight - off);
+        _randomShown = show;
+        ResumeLayout();
     }
 
     // 从当前 UI 状态构建 AppConfig（不触发副作用）
@@ -358,6 +392,7 @@ class ConfigForm : Form
         c.RightClick.RandomColor = _rightRandomBtn.Checked;
         c.InfoText = _originalConfig.InfoText;
         c.InfoUrl = _originalConfig.InfoUrl;
+        c.RandomTexts = (_randomTextBox.Text ?? "").Replace("\r\n", "\n").Replace("\r", "\n");
         c.AutoStart = _autoStartCheckBox.Checked;
         c.HotkeyModifiers = _hotkeyModifiers;
         c.HotkeyKey = _hotkeyKey;
@@ -379,7 +414,7 @@ class ConfigForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(344, 330);
+        ClientSize = new Size(344, 414);
 
         int y = 15;
 
@@ -392,7 +427,7 @@ class ConfigForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList
         };
         _leftEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
-        _leftEffectCombo.SelectedIndexChanged += (s, e) => NotifyPreview();
+        _leftEffectCombo.SelectedIndexChanged += (s, e) => { NotifyPreview(); UpdateRandomTextVisibility(); };
         Controls.Add(_leftEffectCombo);
         _leftPreview = new Panel { Location = new Point(168, y), Size = new Size(20, 20), BorderStyle = BorderStyle.FixedSingle };
         Controls.Add(_leftPreview);
@@ -415,7 +450,7 @@ class ConfigForm : Form
             DropDownStyle = ComboBoxStyle.DropDownList
         };
         _rightEffectCombo.Items.AddRange(EffectRegistry.GetAllNames().ToArray());
-        _rightEffectCombo.SelectedIndexChanged += (s, e) => NotifyPreview();
+        _rightEffectCombo.SelectedIndexChanged += (s, e) => { NotifyPreview(); UpdateRandomTextVisibility(); };
         Controls.Add(_rightEffectCombo);
         _rightPreview = new Panel { Location = new Point(168, y), Size = new Size(20, 20), BorderStyle = BorderStyle.FixedSingle };
         Controls.Add(_rightPreview);
@@ -434,6 +469,23 @@ class ConfigForm : Form
         _rightHex.TextChanged += (s, e) => { UpdatePreview(_rightHex, _rightPreview); NotifyPreview(); };
         _leftHex.Leave += (s, e) => NormalizeHex(_leftHex);
         _rightHex.Leave += (s, e) => NormalizeHex(_rightHex);
+
+        // 随机文字词库（仅当左/右键选择了「随机文字」效果时显示，每行一句，随机抽取弹出）
+        _randomLabel = new Label { Text = "随机文字(每行一句)：", Location = new Point(12, y), AutoSize = true };
+        Controls.Add(_randomLabel);
+        y += 20;
+        _randomTextBox = new TextBox
+        {
+            Multiline = true,            // 必须先于 Size 设置，否则高度会被单行模式钳成一行
+            ScrollBars = ScrollBars.Vertical,
+            WordWrap = false,
+            AcceptsReturn = true,
+            Location = new Point(12, y),
+            Size = new Size(320, 56),
+        };
+        _randomTextBox.TextChanged += (s, e) => NotifyPreview();
+        Controls.Add(_randomTextBox);
+        y += 64;
 
         // 效果大小（+/− 按钮）
         Controls.Add(new Label { Text = "效果大小：", Location = new Point(12, y + 3), AutoSize = true });
@@ -530,6 +582,12 @@ class ConfigForm : Form
         Controls.Add(okBtn);
 
         AcceptButton = okBtn;
+
+        // 记录文本框下方所有控件的原始 Top（布局即按"显示"构建），供按需显隐时精确还原
+        _belowTops = new Dictionary<Control, int>();
+        foreach (Control c in Controls)
+            if (c != _randomLabel && c != _randomTextBox && c.Top > _randomTextBox.Top)
+                _belowTops[c] = c.Top;
     }
 
     // 恢复默认：仅重置动效、颜色、大小，不影响快捷键和开机自启动
@@ -591,6 +649,9 @@ class ConfigForm : Form
 
         _leftHex.Text = config.LeftClick.Primary;
         _rightHex.Text = config.RightClick.Primary;
+        // 文本框只认 \r\n 作为换行；配置里存的是 \n，加载时统一转成 \r\n 否则会挤成一行
+        _randomTextBox.Text = (config.RandomTexts ?? "")
+            .Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
         _leftRandomBtn.Checked = config.LeftClick.RandomColor;
         _rightRandomBtn.Checked = config.RightClick.RandomColor;
 

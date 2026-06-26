@@ -29,6 +29,7 @@ class AnimationState : IDisposable
     public IClickEffect CachedEffect;
     public object EffectData; // 各效果缓存的预计算数据，每动画只算一次
     public float Scale = 1f; // 效果大小缩放系数
+    public int Margin;       // 该动画所需脏矩形半边距(像素,含缩放);0=用默认。供超宽效果(如长文字)上报
     Color _cachedColor;
     bool _colorCached;
     // 仅在 UI 线程（OnPaint → Draw）调用，无需加锁
@@ -2418,6 +2419,321 @@ class FireworkEffect : IClickEffect
             g.ScaleTransform(s, s);
             g.DrawString(data.Word, _font, _brush, -data.Tw / 2f, -data.Th / 2f, _fmt);
             g.Restore(st);
+        }
+    }
+
+    // 生成一个与 from 色相明显不同(偏移 110~250°)的鲜艳随机色
+    static Color RandomDistinctColor(Random rng, Color from)
+    {
+        float h = Hue(from) + 110f + (float)(rng.NextDouble() * 140.0);
+        if (h >= 360f) h -= 360f;
+        float s = 0.75f + (float)(rng.NextDouble() * 0.25f);
+        float v = 0.85f + (float)(rng.NextDouble() * 0.15f);
+        float c = v * s;
+        float x = c * (1f - Math.Abs((h / 60f) % 2f - 1f));
+        float m = v - c;
+        float r, g, b;
+        if (h < 60f) { r = c; g = x; b = 0f; }
+        else if (h < 120f) { r = x; g = c; b = 0f; }
+        else if (h < 180f) { r = 0f; g = c; b = x; }
+        else if (h < 240f) { r = 0f; g = x; b = c; }
+        else if (h < 300f) { r = x; g = 0f; b = c; }
+        else { r = c; g = 0f; b = x; }
+        return Color.FromArgb(
+            (int)((r + m) * 255f + 0.5f),
+            (int)((g + m) * 255f + 0.5f),
+            (int)((b + m) * 255f + 0.5f));
+    }
+
+    static float Hue(Color col)
+    {
+        float r = col.R / 255f, g = col.G / 255f, b = col.B / 255f;
+        float max = Math.Max(r, Math.Max(g, b));
+        float min = Math.Min(r, Math.Min(g, b));
+        float d = max - min;
+        if (d <= 0f) return 0f;
+        float h;
+        if (max == r) h = 60f * (((g - b) / d) % 6f);
+        else if (max == g) h = 60f * (((b - r) / d) + 2f);
+        else h = 60f * (((r - g) / d) + 4f);
+        if (h < 0f) h += 360f;
+        return h;
+    }
+}
+
+// ==================== 随机文字词库 ====================
+// 用户在设置里配置的词库(每行一句)，启动与配置变更时由 OverlayManager 刷新。
+// 仅在 UI 线程读写(设置对话框 + OnPaint 同线程)，数组引用整体替换，读取无需加锁。
+
+static class TextPool
+{
+    static string[] _phrases = new string[0];
+    const int MaxLineLen = 30; // 单行最长字数，防止有人贴一整段把文字撑得比屏幕还宽
+
+    // 把多行原文净化成词库：去空行、去首尾空白、超长单行截断
+    public static void Load(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) { _phrases = new string[0]; return; }
+        var list = new List<string>();
+        var lines = raw.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+        foreach (var line in lines)
+        {
+            var s = line.Trim();
+            if (s.Length == 0) continue;
+            if (s.Length > MaxLineLen) s = s.Substring(0, MaxLineLen);
+            list.Add(s);
+        }
+        _phrases = list.ToArray();
+    }
+
+    // 按种子稳定选一句(一次动画内不变)；词库为空返回 null
+    public static string Pick(int seed)
+    {
+        var arr = _phrases;
+        if (arr.Length == 0) return null;
+        int idx = (int)((uint)seed % (uint)arr.Length);
+        return arr[idx];
+    }
+}
+
+// ==================== 效果：随机文字 ====================
+// 复用「恭喜发财」的升空→炸开→文字弹出动画；文字随机取自用户词库(TextPool)，
+// 烟花扩散范围(火星数量与速度)与文字长度正相关。
+
+class RandomTextEffect : IClickEffect
+{
+    public string Name { get { return "随机文字"; } }
+    public int Duration { get { return 1100; } }
+
+    const float FontPx = 22f;
+    const float RiseEnd = 0.30f;
+    const float MaxTiltDeg = 12f;
+    const float GravFall = 10f;
+    const int TrailDots = 5;
+
+    class Particle { public float Cos, Sin, Speed, Bri, TwPhase, TwSpeed; }
+
+    class Data
+    {
+        public float Dx, RiseH;
+        public float TiltDeg, SizeMul, AlphaMul;
+        public Color TextColor;
+        public Particle[] Parts;
+        public string Word;        // 本次随机选中的文字(词库为空时为 "")
+        public float Tw, Th;       // 文本尺寸，首次测量后缓存
+    }
+
+    Font _font;
+    StringFormat _fmt;
+    SolidBrush _brush = new SolidBrush(Color.Black);
+    Pen _ringPen = new Pen(Color.Black, 1.5f);
+
+    public RandomTextEffect()
+    {
+        _font = new Font("KaiTi", FontPx, FontStyle.Bold, GraphicsUnit.Pixel);
+        _fmt = StringFormat.GenericTypographic;
+    }
+
+    public void Cleanup()
+    {
+        if (_font != null) { _font.Dispose(); _font = null; }
+        if (_fmt != null) { _fmt.Dispose(); _fmt = null; }
+        _brush.Dispose();
+        _ringPen.Dispose();
+    }
+
+    public void Draw(Graphics g, AnimationState anim, ColorConfig color, Rectangle screenBounds)
+    {
+        int cx = anim.Position.X - screenBounds.X;
+        int cy = anim.Position.Y - screenBounds.Y;
+        float scale = anim.Scale;
+        Color baseColor = anim.GetColor(color);
+        int hotR = (int)(baseColor.R + (255 - baseColor.R) * 0.35f);
+        int hotG = (int)(baseColor.G + (255 - baseColor.G) * 0.35f);
+        int hotB = (int)(baseColor.B + (255 - baseColor.B) * 0.35f);
+
+        var data = anim.EffectData as Data;
+        if (data == null)
+        {
+            var rng = new Random(unchecked(anim.RandomSeed ^ 0x52545854)); // 'RTXT'
+            string word = TextPool.Pick(anim.RandomSeed) ?? "";
+            int chars = word.Length;
+            // 长度系数：2 字≈1.0，越长烟花越大(上限 2.4 倍)
+            float lenK = Math.Max(0.8f, Math.Min(2.4f, chars * 0.5f));
+
+            int n = 22 + rng.Next(8) + Math.Min(18, chars * 2); // 火星数量随长度增加
+            var parts = new Particle[n];
+            for (int i = 0; i < n; i++)
+            {
+                double ang = rng.NextDouble() * Math.PI * 2;
+                parts[i] = new Particle
+                {
+                    Cos = (float)Math.Cos(ang),
+                    Sin = (float)Math.Sin(ang),
+                    Speed = (15f + (float)(rng.NextDouble() * 20f)) * lenK, // 扩散半径随长度放大
+                    Bri = 0.7f + (float)(rng.NextDouble() * 0.3f),
+                    TwPhase = (float)(rng.NextDouble() * Math.PI * 2),
+                    TwSpeed = 8f + (float)(rng.NextDouble() * 9f),
+                };
+            }
+            data = new Data
+            {
+                Dx = (float)((rng.NextDouble() - 0.5) * 28.0),
+                RiseH = 40f + (float)(rng.NextDouble() * 28f),
+                TiltDeg = (float)((rng.NextDouble() - 0.5) * 2.0 * MaxTiltDeg),
+                SizeMul = 0.85f + (float)(rng.NextDouble() * 0.4f),
+                AlphaMul = 0.7f + (float)(rng.NextDouble() * 0.3f),
+                TextColor = color.RandomColor ? RandomDistinctColor(rng, baseColor) : baseColor,
+                Parts = parts,
+                Word = word,
+                Tw = -1f,
+            };
+            anim.EffectData = data;
+
+            // 上报脏矩形所需半边距：覆盖文字宽高、炸点抬升、火星扩散，避免长文字留残影。
+            // 用字数估算文字半宽(charW 取偏大值更保险，宁可多清一点也不留影)。
+            const float charW = FontPx * 1.15f;
+            float halfTextW = chars * charW * data.SizeMul * scale * 0.5f;
+            float halfTextH = FontPx * data.SizeMul * scale * 0.7f;
+            float sparkReach = (35f * lenK + 14f) * scale;
+            float reach = Math.Max(
+                Math.Max(Math.Abs(data.Dx) * scale + halfTextW, data.RiseH * scale + halfTextH),
+                sparkReach);
+            anim.Margin = (int)(reach + 10f);
+        }
+
+        float t = anim.Age / (float)Duration;
+
+        float bx = cx + data.Dx * scale;          // 炸点
+        float by = cy - data.RiseH * scale;
+
+        // 让炸点(烟花+文字一起)大致留在屏幕内：用字数粗估文本半宽夹一下，
+        // 文字过长则放弃水平夹取(否则会把两侧都顶出去)
+        int wordLen = data.Word.Length;
+        float halfW = wordLen * FontPx * 0.6f * data.SizeMul * scale * 0.5f;
+        float halfH = FontPx * data.SizeMul * scale * 0.6f;
+        float W = screenBounds.Width, H = screenBounds.Height;
+        if (halfW * 2f + 8f < W)
+            bx = Math.Max(halfW + 4f, Math.Min(W - halfW - 4f, bx));
+        if (halfH * 2f + 8f < H)
+            by = Math.Max(halfH + 4f, Math.Min(H - halfH - 4f, by));
+
+        // 起手点击反馈：点击处一圈快速扩散淡出的小环 + 亮芯
+        float ct = t / 0.16f;
+        if (ct < 1f)
+        {
+            float ce = Easing.EaseOutQuad(ct);
+            float cFade = 1f - ce;
+            float rr = (3f + 9f * ce) * scale;
+            _ringPen.Width = 1.5f * scale * cFade + 0.3f;
+            _ringPen.Color = Color.FromArgb((int)(200 * cFade), baseColor);
+            g.DrawEllipse(_ringPen, cx - rr, cy - rr, rr * 2f, rr * 2f);
+
+            float dr = 2.2f * scale * cFade;
+            if (dr > 0.3f)
+            {
+                _brush.Color = Color.FromArgb((int)(220 * cFade), hotR, hotG, hotB);
+                g.FillEllipse(_brush, cx - dr, cy - dr, dr * 2f, dr * 2f);
+            }
+        }
+
+        if (t < RiseEnd)
+        {
+            // —— 升空：光点从点击处加速上升、末端减速到炸点，带一截淡尾 ——
+            float rt = t / RiseEnd;
+            float re = Easing.EaseOutQuad(rt);
+            float px = cx + (bx - cx) * re;
+            float py = cy + (by - cy) * re;
+
+            for (int k = 4; k >= 1; k--)
+            {
+                float tp = re - k * 0.1f;
+                if (tp <= 0f) continue;
+                float txp = cx + (bx - cx) * tp;
+                float typ = cy + (by - cy) * tp;
+                float tr = (1.4f - k * 0.18f) * scale;
+                _brush.Color = Color.FromArgb((int)(70 * (1f - k * 0.2f)), baseColor);
+                g.FillEllipse(_brush, txp - tr, typ - tr, tr * 2f, tr * 2f);
+            }
+
+            float gr = 3f * scale;
+            _brush.Color = Color.FromArgb(90, baseColor);
+            g.FillEllipse(_brush, px - gr, py - gr, gr * 2f, gr * 2f);
+            float hr = 1.6f * scale;
+            _brush.Color = Color.FromArgb(235, hotR, hotG, hotB);
+            g.FillEllipse(_brush, px - hr, py - hr, hr * 2f, hr * 2f);
+            return;
+        }
+
+        // —— 炸开 ——
+        float bt = (t - RiseEnd) / (1f - RiseEnd);
+        float pFade = 1f - bt * bt;
+
+        // 起爆闪光
+        if (bt < 0.22f)
+        {
+            float fl = 1f - bt / 0.22f;
+            float r2 = (4f + 14f * (1f - fl)) * scale;
+            _brush.Color = Color.FromArgb((int)(150 * fl * fl), baseColor);
+            g.FillEllipse(_brush, bx - r2, by - r2, r2 * 2f, r2 * 2f);
+            float r1 = (2f + 5f * (1f - fl)) * scale;
+            _brush.Color = Color.FromArgb((int)(220 * fl), hotR, hotG, hotB);
+            g.FillEllipse(_brush, bx - r1, by - r1, r1 * 2f, r1 * 2f);
+        }
+
+        // 火星：径向飞散 + 轻微下坠，沿轨迹采样若干点成柔和彗尾
+        for (int i = 0; i < data.Parts.Length; i++)
+        {
+            var p = data.Parts[i];
+            float tw = 0.6f + 0.4f * (float)Math.Sin(p.TwPhase + p.TwSpeed * bt);
+            float fade = pFade * p.Bri * tw;
+            if (fade <= 0.02f) continue;
+
+            float ps = p.Speed * scale;
+            for (int j = 0; j < TrailDots; j++)
+            {
+                float falloff = 1f - (float)j / TrailDots;
+                int aa = (int)((j == 0 ? 255 : 210) * fade * falloff);
+                if (aa <= 1) break;
+                float sbt = bt - j * 0.05f;
+                if (sbt < 0f) break;
+
+                float sp = Easing.EaseOutQuad(sbt);
+                float d = ps * sp;
+                float x = bx + p.Cos * d;
+                float y = by + p.Sin * d + GravFall * sbt * sbt * scale;
+                float r = (0.4f + 1.3f * falloff) * scale;
+
+                if (j == 0) _brush.Color = Color.FromArgb(aa, hotR, hotG, hotB);
+                else _brush.Color = Color.FromArgb(aa, baseColor);
+                g.FillEllipse(_brush, x - r, y - r, r * 2f, r * 2f);
+            }
+        }
+
+        // 文字：炸开瞬间弹出随机文字，随烟花一起淡出(词库为空则只放烟花)
+        if (data.Word.Length > 0)
+        {
+            if (data.Tw < 0f)
+            {
+                SizeF sz = g.MeasureString(data.Word, _font, new PointF(0f, 0f), _fmt);
+                data.Tw = sz.Width;
+                data.Th = sz.Height;
+            }
+            float pop = Easing.EaseOutBack(Math.Min(1f, bt / 0.22f));
+            float ta = Math.Min(1f, bt / 0.12f);
+            if (bt > 0.6f) ta *= 1f - (bt - 0.6f) / 0.4f;
+            if (ta > 0.01f)
+            {
+                _brush.Color = Color.FromArgb((int)(255 * ta * data.AlphaMul), data.TextColor);
+                GraphicsState st = g.Save();
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                g.TranslateTransform(bx, by);
+                g.RotateTransform(data.TiltDeg);
+                float s = scale * data.SizeMul * (0.5f + 0.5f * pop);
+                g.ScaleTransform(s, s);
+                g.DrawString(data.Word, _font, _brush, -data.Tw / 2f, -data.Th / 2f, _fmt);
+                g.Restore(st);
+            }
         }
     }
 

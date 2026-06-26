@@ -239,6 +239,7 @@ class OverlayManager : IDisposable
     public OverlayManager()
     {
         Config = ConfigManager.Load();
+        TextPool.Load(Config.RandomTexts);
         _timer = new Timer { Interval = TICK_MS };
         _timer.Tick += OnTimerTick;
     }
@@ -328,16 +329,18 @@ class OverlayManager : IDisposable
         {
             using (var form = new ConfigForm(Config))
             {
-                form.OnPreview = preview => { Config = preview; };
+                form.OnPreview = preview => { Config = preview; TextPool.Load(preview.RandomTexts); };
                 if (form.ShowDialog() == DialogResult.OK)
                 {
                     Config = form.Result;
                     ConfigManager.Save(Config);
+                    TextPool.Load(Config.RandomTexts);
                     ApplyHotkey();
                 }
                 else
                 {
                     Config = original; // 取消时还原
+                    TextPool.Load(Config.RandomTexts);
                 }
             }
         }
@@ -719,7 +722,7 @@ class OverlayForm : Form
 
         for (int i = 0; i < anims.Count; i++)
         {
-            int margin = (int)(BASE_MARGIN * anims[i].Scale);
+            int margin = Math.Max((int)(BASE_MARGIN * anims[i].Scale), anims[i].Margin);
             int ax = anims[i].Position.X - Left - margin;
             int ay = anims[i].Position.Y - Top - margin;
             var area = new Rectangle(ax, ay, margin * 2, margin * 2);

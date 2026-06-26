@@ -71,6 +71,7 @@ static class Program
         EffectRegistry.Register(new ConfettiEffect());
         EffectRegistry.Register(new FireflyEffect());
         EffectRegistry.Register(new FireworkEffect());
+        EffectRegistry.Register(new RandomTextEffect());
 
         // 同步开机自启动注册表
         var config = ConfigManager.Load();
