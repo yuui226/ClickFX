@@ -2284,7 +2284,7 @@ class FireworkEffect : IClickEffect
             data = new Data
             {
                 Dx = (float)((rng.NextDouble() - 0.5) * 28.0),    // 升空时的水平随机
-                RiseH = 44f + (float)(rng.NextDouble() * 46f),    // 升空高度(44~90)
+                RiseH = 40f + (float)(rng.NextDouble() * 28f),    // 升空高度(40~68)
                 TiltDeg = (float)((rng.NextDouble() - 0.5) * 2.0 * MaxTiltDeg),
                 SizeMul = 0.8f + (float)(rng.NextDouble() * 0.6f),   // 字号随机(0.8~1.4)
                 AlphaMul = 0.55f + (float)(rng.NextDouble() * 0.45f), // 透明度随机(0.55~1.0)

@@ -76,6 +76,10 @@ static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int X, int Y, int cx, int cy, uint uFlags);
 }
 
 public delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -137,6 +141,14 @@ static class WinConsts
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_POPUP = unchecked((int)0x80000000);
     public const int GWL_EXSTYLE = -20;
+
+    // SetWindowPos —— 重新置顶用
+    public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_NOOWNERZORDER = 0x0200;
+    public const uint SWP_NOSENDCHANGING = 0x0400;
     public const int ULW_ALPHA = 0x00000002;
     public const byte AC_SRC_ALPHA = 0x01;
     public const byte AC_SRC_OVER = 0x00;
@@ -588,6 +600,9 @@ class OverlayForm : Form
     IntPtr _cachedHdcScreen; // 屏幕 DC，生命周期内不变，避免每帧重新获取
     Rectangle _prevAnimArea; // 上一帧的动效区域（非脏矩形，避免无限增长）
     internal bool _hadAnimations; // 上一帧是否有动画（用于按需 Invalidate）
+    int _lastTopmostTick; // 上次重新断言置顶的时刻（节流用）
+
+    const int TOPMOST_REASSERT_MS = 300; // 持续播放期间重新置顶的节流周期
 
     void EnsureDib(int w, int h)
     {
@@ -745,6 +760,23 @@ class OverlayForm : Form
                 var effect = anims[i].CachedEffect;
                 if (effect != null)
                     effect.Draw(_cachedGraphics, anims[i], color, Bounds);
+            }
+        }
+
+        // 重新断言置顶（须在 _hadAnimations 更新前，以利用上一帧状态）：
+        // 其他"总在最前"的窗口（通知、置顶应用、无边框全屏等）一旦激活会盖到
+        // 本 Overlay 之上，而 UpdateLayeredWindow 只改像素不改 Z 序。特效刚出现的
+        // 那一帧立即抬回最前，持续播放期间按 TOPMOST_REASSERT_MS 节流纠正，
+        // 避免每帧都调用 SetWindowPos。
+        if (anims.Count > 0)
+        {
+            int now = Environment.TickCount;
+            if (!_hadAnimations || unchecked(now - _lastTopmostTick) >= TOPMOST_REASSERT_MS)
+            {
+                NativeMethods.SetWindowPos(Handle, WinConsts.HWND_TOPMOST, 0, 0, 0, 0,
+                    WinConsts.SWP_NOMOVE | WinConsts.SWP_NOSIZE | WinConsts.SWP_NOACTIVATE
+                    | WinConsts.SWP_NOOWNERZORDER | WinConsts.SWP_NOSENDCHANGING);
+                _lastTopmostTick = now;
             }
         }
 
